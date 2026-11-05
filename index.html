@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2563EB">
+<meta name="description" content="Chấm phiếu trắc nghiệm THPT bằng camera điện thoại, chạy hoàn toàn trên máy">
+<title>Chấm Phiếu THPT</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="icon-btn back" id="btn-back" aria-label="Quay lại" hidden>
+    <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+  </button>
+  <h1 id="title">Chấm Phiếu</h1>
+  <button class="chip engine" id="engine-chip" aria-live="polite"><i></i><span>Đang khởi động…</span></button>
+  <button class="icon-btn" id="btn-install" aria-label="Cài đặt ứng dụng" hidden>
+    <svg viewBox="0 0 24 24"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 20h14"/></svg>
+  </button>
+</header>
+
+<main>
+  <!-- ============ CHẤM ============ -->
+  <section class="view active" id="view-scan">
+    <div class="card key-banner" id="key-banner"></div>
+
+    <div class="card capture">
+      <button class="shutter-big" id="btn-camera">
+        <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+        <span>Chụp phiếu để chấm</span>
+      </button>
+      <div class="row2">
+        <button class="btn soft" id="btn-gallery">
+          <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 16l5-5 4 4 2-2 5 5"/></svg>
+          Chọn ảnh có sẵn
+        </button>
+        <button class="btn soft" id="btn-native">
+          <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/></svg>
+          Camera của máy
+        </button>
+      </div>
+      <label class="switch-row">
+        <input type="checkbox" id="sw-continuous">
+        <span><b>Chụp liên tục</b><small>Chụp xong tự lưu, chụp ngay tờ tiếp theo</small></span>
+      </label>
+    </div>
+
+    <details class="card tips" id="tips">
+      <summary>Mẹo chụp để chấm chính xác</summary>
+      <ul>
+        <li><b>Đủ sáng, không bóng đổ</b> – bật đèn ⚡ nếu phòng tối.</li>
+        <li><b>Chụp thẳng từ trên xuống</b>, điện thoại song song mặt giấy.</li>
+        <li><b>Lấy trọn cả tờ phiếu</b>, đặt trên nền tối, phẳng.</li>
+        <li>Phiếu ngược / nằm ngang vẫn chấm được.</li>
+      </ul>
+    </details>
+
+    <div class="section-title" id="recent-title" hidden>Vừa chấm</div>
+    <div id="recent"></div>
+  </section>
+
+  <!-- ============ KẾT QUẢ 1 PHIẾU ============ -->
+  <section class="view" id="view-result"></section>
+
+  <!-- ============ ĐÁP ÁN ============ -->
+  <section class="view" id="view-keys">
+    <div class="card hint">
+      Mỗi mã đề một bộ đáp án. Khi chấm, ứng dụng <b>tự chọn đúng bộ đáp án</b> theo mã đề tô trên phiếu.
+    </div>
+    <div id="key-list"></div>
+    <div class="row2">
+      <button class="btn primary" id="btn-key-new">+ Thêm đáp án</button>
+      <button class="btn soft" id="btn-key-file">Nhập file .txt</button>
+    </div>
+  </section>
+
+  <!-- ============ LỊCH SỬ ============ -->
+  <section class="view" id="view-history">
+    <div class="card stats" id="hist-stats"></div>
+    <div class="row3">
+      <button class="btn primary" id="btn-export">Xuất Excel</button>
+      <button class="btn soft" id="btn-regrade-all">Chấm lại hết</button>
+      <button class="btn soft danger" id="btn-clear">Xoá hết</button>
+    </div>
+    <input class="search" id="hist-search" type="search" placeholder="Tìm theo số báo danh…" inputmode="numeric">
+    <div id="hist-list"></div>
+  </section>
+
+  <!-- ============ CÀI ĐẶT ============ -->
+  <section class="view" id="view-settings">
+    <div class="card form">
+      <h3>Thang điểm</h3>
+      <label class="field"><span>Phần I – điểm mỗi câu</span>
+        <input type="text" inputmode="decimal" id="set-p1"></label>
+      <label class="field"><span>Phần III – điểm mỗi câu</span>
+        <select id="set-p3"><option value="0.25">0,25 (các môn)</option><option value="0.5">0,5 (Toán)</option></select></label>
+      <div class="field"><span>Phần II – điểm theo số ý đúng</span>
+        <div class="p2-scale" id="set-p2"></div></div>
+    </div>
+    <div class="card form">
+      <h3>Nhận dạng</h3>
+      <label class="switch-row"><input type="checkbox" id="set-autokey">
+        <span><b>Tự chọn đáp án theo mã đề</b><small>Tắt để luôn dùng bộ đáp án đã chọn</small></span></label>
+      <label class="field"><span>Độ nhạy nhận ô tô: <b id="set-delta-v"></b></span>
+        <input type="range" min="15" max="60" step="1" id="set-delta">
+        <small>Thấp = nhận cả vết tô nhạt; cao = bỏ qua vết bẩn. Mặc định 30.</small></label>
+      <label class="switch-row"><input type="checkbox" id="set-vibrate">
+        <span><b>Rung khi chấm xong</b></span></label>
+    </div>
+    <div class="card form">
+      <h3>Dữ liệu</h3>
+      <p class="muted" id="storage-info">…</p>
+      <p class="muted small">Ảnh và điểm chỉ lưu trên điện thoại này, không gửi đi đâu.</p>
+      <button class="btn soft" id="btn-update">Kiểm tra cập nhật</button>
+      <p class="muted small" id="app-version"></p>
+    </div>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <button data-view="scan" class="active"><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span>Chấm</span></button>
+  <button data-view="keys"><svg viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M20 12v7H4V5h11"/></svg><span>Đáp án</span></button>
+  <button data-view="history"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Kết quả</span><em id="hist-badge" hidden></em></button>
+  <button data-view="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10l2 2M5 19l2-2M17 7l2-2"/></svg><span>Cài đặt</span></button>
+</nav>
+
+<!-- ============ CAMERA ============ -->
+<div class="overlay camera" id="camera" hidden>
+  <video id="cam-video" playsinline muted autoplay></video>
+  <div class="cam-frame"><div class="cam-guide"><i></i><i></i><i></i><i></i></div></div>
+  <div class="cam-top">
+    <button class="icon-btn light" id="cam-close" aria-label="Đóng"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    <span class="cam-hint" id="cam-hint">Đặt trọn tờ phiếu vào khung</span>
+    <button class="icon-btn light" id="cam-torch" aria-label="Đèn" hidden><svg viewBox="0 0 24 24"><path d="M13 2L5 14h6l-1 8 8-12h-6z"/></svg></button>
+  </div>
+  <div class="cam-results" id="cam-results"></div>
+  <div class="cam-bottom">
+    <button class="icon-btn light big" id="cam-gallery" aria-label="Chọn ảnh"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 16l5-5 4 4 2-2 5 5"/></svg></button>
+    <button class="shutter" id="cam-shutter" aria-label="Chụp"><i></i></button>
+    <span class="cam-count" id="cam-count"></span>
+  </div>
+  <div class="cam-flash" id="cam-flash"></div>
+</div>
+
+<!-- ============ XEM ẢNH (phóng to) ============ -->
+<div class="overlay viewer" id="viewer" hidden>
+  <img id="viewer-img" alt="Ảnh kết quả">
+  <button class="icon-btn light viewer-close" id="viewer-close" aria-label="Đóng"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  <div class="viewer-hint">Chụm 2 ngón để phóng to · chạm 2 lần để zoom</div>
+</div>
+
+<!-- ============ SOẠN ĐÁP ÁN ============ -->
+<div class="overlay sheet" id="key-editor" hidden>
+  <header class="topbar">
+    <button class="icon-btn back" id="ke-close" aria-label="Đóng"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    <h1 id="ke-title">Đáp án</h1>
+    <button class="btn primary sm" id="ke-save">Lưu</button>
+  </header>
+  <div class="ke-body">
+    <label class="field made"><span>Mã đề</span>
+      <input type="text" inputmode="numeric" maxlength="4" id="ke-made" placeholder="VD: 101"></label>
+    <div class="seg" id="ke-tabs">
+      <button data-tab="p1" class="active">Phần I<small id="ke-c1"></small></button>
+      <button data-tab="p2">Phần II<small id="ke-c2"></small></button>
+      <button data-tab="p3">Phần III<small id="ke-c3"></small></button>
+      <button data-tab="txt">Dạng chữ</button>
+    </div>
+    <div class="ke-pane active" id="ke-p1"></div>
+    <div class="ke-pane" id="ke-p2"></div>
+    <div class="ke-pane" id="ke-p3"></div>
+    <div class="ke-pane" id="ke-txt">
+      <p class="muted small">Dán đáp án (từ Zalo, Word…) theo mẫu dưới rồi bấm <b>Đọc đáp án</b>. Câu nào bỏ trống thì không chấm.</p>
+      <textarea id="ke-text" rows="14" spellcheck="false"></textarea>
+      <div class="row2">
+        <button class="btn primary" id="ke-parse">Đọc đáp án</button>
+        <button class="btn soft" id="ke-paste">Dán từ bộ nhớ</button>
+      </div>
+      <p class="err" id="ke-err"></p>
+    </div>
+    <button class="btn soft danger wide" id="ke-delete" hidden>Xoá bộ đáp án này</button>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status"></div>
+<input type="file" id="file-gallery" accept="image/*" multiple hidden>
+<input type="file" id="file-native" accept="image/*" capture="environment" hidden>
+<input type="file" id="file-key" accept=".txt,text/plain" hidden>
+<script src="xlsx.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
