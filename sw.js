@@ -1,10 +1,10 @@
 /* Service worker: lưu sẵn ứng dụng + Python/OpenCV để dùng được cả khi không có mạng. */
-const VERSION = "5d18e111bd"; // build_mobile.py tự cập nhật mỗi lần đóng gói
+const VERSION = "37c4f0768d"; // build_mobile.py tự cập nhật mỗi lần đóng gói
 const APP_CACHE = "cham-app-" + VERSION;
 const CDN = "https://cdn.jsdelivr.net/pyodide/v0.29.3/full/";
 const CDN_CACHE = "cham-pyodide-v0.29.3";
 const APP_FILES = ["./", "index.html", "app.css", "app.js", "xlsx.js", "engine-worker.js", "bridge.py", "omr.py",
-  "models/mnist12.npz", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png"];
+  "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png"];
 const CDN_FILES = ["pyodide.js", "pyodide.asm.js", "pyodide.asm.wasm", "python_stdlib.zip", "pyodide-lock.json",
   "numpy-2.2.5-cp313-cp313-pyodide_2025_0_wasm32.whl", "opencv_python-4.11.0.86-cp313-cp313-pyodide_2025_0_wasm32.whl"].map((f) => CDN + f);
 

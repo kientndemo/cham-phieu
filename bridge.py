@@ -48,9 +48,19 @@ def process(token, buf, w, h, delta):
         "part1": [{"q": it["q"], "answer": it["answer"], "multi": it["multi"]} for it in res["part1"]],
         "part2": [{"q": it["q"], "items": [{"answer": s["answer"], "multi": s["multi"]} for s in it["items"]]}
                   for it in res["part2"]],
-        "part3": [{"q": it["q"], "value": it["value"], "valid": it["valid"], "conf": float(it["conf"])}
+        "part3": [{"q": it["q"], "value": it["value"], "valid": it["valid"], "note": _p3_note(it)}
                   for it in res["part3"]],
     })
+
+
+def _p3_note(it):
+    if it["multi"]:
+        return "tô nhiều ô"
+    if it["value"] and not it["valid"]:
+        return "không hợp lệ"
+    if it["faint"]:
+        return "tô mờ"
+    return ""
 
 
 def crop(token, i):

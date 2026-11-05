@@ -122,6 +122,7 @@ function showView(name) {
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + name));
   $("#title").textContent = TITLES[name];
   $("#btn-back").hidden = name !== "result";
+  document.body.classList.toggle("in-result", name === "result");   // màn kết quả: ẩn thanh tab cho rộng chỗ
   window.scrollTo(0, 0);
 }
 function switchTab(tab) {
@@ -193,7 +194,7 @@ function gradeSource(src, { token = uid(), override = {} } = {}) {
 function toRecord(r, old) {
   const g = r.graded, rd = r.read;
   const p3 = rd.part3.map((it) => (r.p3final[it.q] || {}).value || "");
-  const lowConf = rd.part3.some((it) => !(it.q in r.override) && it.value && (!it.valid || it.conf < 0.7));
+  const lowConf = rd.part3.some((it) => !(it.q in r.override) && it.note);
   return {
     id: r.token, time: old ? old.time : Date.now(), src: r.src,
     sbd: rd.sbd, made: rd.made, keyId: r.key && r.key.id, keyMade: r.key && r.key.made,
@@ -298,30 +299,35 @@ function renderResult() {
 
   // --- cảnh báo
   const warns = [...(g ? g.warnings : []), ...rd.warnings];
-  if (warns.length) kids.push(h("div", { class: "card warns" }, h("h3", {}, `⚠ Cần kiểm tra (${warns.length})`), h("ul", {}, warns.map((w) => h("li", {}, w)))));
+  if (warns.length) {   // chỉ hiện 3 dòng đầu, còn lại thu gọn cho đỡ phải cuộn
+    const li = (w) => h("li", {}, w);
+    kids.push(h("div", { class: "card warns" }, h("h3", {}, `⚠ Cần kiểm tra (${warns.length})`),
+      h("ul", {}, warns.slice(0, 3).map(li)),
+      warns.length > 3 ? h("details", {}, h("summary", {}, `Xem thêm ${warns.length - 3} lưu ý`), h("ul", {}, warns.slice(3).map(li))) : null));
+  }
 
-  // --- Phần III: đối chiếu chữ viết tay
+  // --- Phần III: bài tô ô tròn (ảnh chữ viết chỉ để đối chiếu), sửa được
   if (rd.part3.length) {
-    const card = h("div", { class: "card" }, h("h3", {}, "✍️ Phần III – kiểm tra chữ viết"),
-      h("p", { class: "muted small", style: "margin:-4px 0 6px" }, "Máy đọc sai thì sửa trực tiếp vào ô, điểm tự tính lại."));
+    const card = h("div", { class: "card" }, h("h3", {}, "🔢 Phần III – bài tô"),
+      h("p", { class: "muted small", style: "margin:-6px 0 4px" }, "Đọc theo ô tròn đã tô. Cần thì sửa vào ô, điểm tự tính lại."));
     const g3 = g ? Object.fromEntries(g.p3.map((x) => [x.q, x])) : {};
     rd.part3.forEach((it, i) => {
       const fin = cur.p3final[it.q] || { value: it.value };
       const gi = g3[it.q];
+      const edited = it.q in cur.edits;
       const input = h("input", {
         type: "text", inputmode: "decimal", value: fin.value, placeholder: "(trống)", autocomplete: "off",
-        class: (it.q in cur.edits ? "edited" : "") + (fin.value && !validP3(fin.value) ? " invalid" : ""),
+        class: (edited ? "edited" : "") + (fin.value && !validP3(fin.value) ? " invalid" : ""),
         onchange: (e) => editP3(it.q, e.target.value),
         onkeydown: (e) => { if (e.key === "Enter") e.target.blur(); },
       });
-      const lo = it.value && (!it.valid || it.conf < 0.7);
-      const confEl = it.q in cur.edits ? h("span", { class: "conf hi" }, "đã sửa")
-        : it.value ? h("span", { class: "conf " + (lo ? "lo" : "hi") }, Math.round(it.conf * 100) + "%") : null;
       const mark = gi ? h("span", { class: "mark " + (gi.ok ? "ok" : "bad") }, gi.ok ? "✓" : "✗") : h("span", { class: "mark na" }, "–");
+      const note = edited ? h("div", { class: "note edited" }, `✏️ Đã sửa (máy đọc: ${it.value || "trống"})`)
+        : it.note ? h("div", { class: "note" }, "⚠ " + it.note + " – kiểm tra lại") : null;
       card.append(h("div", { class: "p3row" },
-        h("div", { class: "qn" }, "Câu " + it.q, gi ? h("small", {}, "ĐA: " + gi.key) : null),
+        h("div", { class: "qn" }, "Câu " + it.q, gi ? h("small", {}, "ĐA " + gi.key) : null),
         h("img", { src: blobUrl(rd.crops[i]), alt: "Chữ viết câu " + it.q }),
-        h("div", { class: "p3edit" }, input, confEl, mark)));
+        input, mark, note));
     });
     kids.push(card);
   }
@@ -649,7 +655,7 @@ async function exportExcel() {
   all.forEach((r, i) => rows.push([i + 1, r.sbd, r.made, r.score, r.max ? Math.round(r.score / r.max * 1000) / 100 : null,
     r.s1 ? `${r.s1[0]}/${r.s1[1]}` : "", r.s1 ? r.s1[2] : null, r.s2 ? `${r.s2[0]}/${r.s2[1]}` : "", r.s2 ? r.s2[2] : null,
     r.s3 ? `${r.s3[0]}/${r.s3[1]}` : "", r.s3 ? r.s3[2] : null, r.p1, r.p2, r.p3,
-    [...(r.warns || []), r.review ? "Phần III cần đối chiếu chữ viết" : ""].filter(Boolean).join(" | "), new Date(r.time).toLocaleString("vi-VN")]));
+    [...(r.warns || []), r.review ? "Phần III cần kiểm tra bài tô" : ""].filter(Boolean).join(" | "), new Date(r.time).toLocaleString("vi-VN")]));
   const blob = makeXlsx(rows, [5, 9, 8, 10, 9, 11, 9, 11, 9, 12, 10, 44, 40, 30, 40, 18]);
   const d = new Date();
   download(blob, `ket-qua-cham-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${d.getHours()}h${String(d.getMinutes()).padStart(2, "0")}.xlsx`);

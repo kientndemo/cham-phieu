@@ -10,8 +10,8 @@ async function boot() {
   say("Đang tải OpenCV (chỉ lần đầu)…", 35);
   await py.loadPackage(["numpy", "opencv-python"]);
   say("Đang nạp bộ chấm…", 85);
-  py.FS.mkdirTree("/app/models");
-  for (const f of ["omr.py", "bridge.py", "models/mnist12.npz"]) {
+  py.FS.mkdirTree("/app");
+  for (const f of ["omr.py", "bridge.py"]) {
     const r = await fetch(f);
     if (!r.ok) throw new Error("Không tải được " + f);
     py.FS.writeFile("/app/" + f, new Uint8Array(await r.arrayBuffer()));

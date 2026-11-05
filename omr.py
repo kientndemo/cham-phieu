@@ -4,7 +4,6 @@ Lõi nhận dạng & chấm phiếu trả lời trắc nghiệm mẫu THPT
 
 Dùng chung cho giao diện (app.py) và dòng lệnh (cham_phieu.py).
 """
-import os
 import re
 import unicodedata
 
@@ -390,21 +389,24 @@ def _read(img, delta, boost=False):
                                   "multi": len(filled) > 1})
                 part2.append({"q": bi * 2 + k + 1, "items": items})
 
-    # ---- Phần III: đọc CHỮ VIẾT TAY trong dải 4 ô vuông phía trên mỗi khung ----
+    # ---- Phần III: 6 khung, đọc các ô tròn "-", "," và chữ số 0..9 của 4 cột ----
     part3 = []
     if len(p3b) != 6:
         if p2b or p3b:
             warnings.append(f"Chỉ tìm thấy {len(p3b)}/6 khung Phần III — bỏ qua Phần III.")
     else:
         for bi, b in enumerate(p3b):
-            it = read_handwritten(img, b)
-            it["q"] = bi + 1
-            if it["value"] and not it["valid"]:
-                warnings.append(f"Phần III câu {bi + 1}: đọc được '{it['value']}' — không phải số hợp lệ, "
-                                "cần kiểm tra lại.")
-            elif it["value"] and it["conf"] < HW_CONF_WARN:
-                warnings.append(f"Phần III câu {bi + 1}: máy đọc '{it['value']}' nhưng chưa chắc chắn "
-                                f"({it['conf']:.0%}) — nên kiểm tra lại.")
+            it = read_p3(img, red, b, circles, r, delta)
+            it["q"] = q = bi + 1
+            for col, f in it["multi"]:
+                warnings.append(f"Phần III câu {q}: cột {col + 1} tô nhiều ô "
+                                f"({', '.join(_p3_cell_name(i) for i in f)}).")
+            if it["value"] and not it["valid"] and not it["multi"]:
+                why = " (có cột trống xen giữa)" if it["gap"] else ""
+                warnings.append(f"Phần III câu {q}: bài tô '{it['value']}' không phải số hợp lệ{why}.")
+            if it["faint"]:
+                warnings.append(f"Phần III câu {q}: có vết tô mờ ở ô "
+                                f"{', '.join(_p3_cell_name(i) for i in it['faint'])} — nên kiểm tra lại.")
             part3.append(it)
 
     for it in part1:
@@ -428,50 +430,20 @@ def _read(img, delta, boost=False):
 
 
 # ----------------------------------------------------------------------------
-# Phần III – đọc chữ viết tay (chữ số, dấu "-" và dấu ",") trong dải 4 ô vuông
+# Phần III – đọc các Ô TRÒN đã tô (giống quy tắc tô của phiếu THPT)
+#   hàng 1: 1 ô "-"  -> số âm
+#   hàng 2: ô ","    -> vị trí dấu phẩy (ở cột 2 hoặc cột 3)
+#   hàng 3..12: chữ số 0..9 của từng cột (4 cột)
 # ----------------------------------------------------------------------------
-# Trọng số mạng MNIST (lấy từ ONNX model zoo mnist-12) lưu dạng numpy để chạy được ở mọi nơi
-# (máy tính, trình duyệt điện thoại qua Pyodide) mà không cần cv2.dnn / onnxruntime.
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "mnist12.npz")
-HW_CONF_WARN = 0.70        # dưới mức tin cậy này thì cảnh báo giáo viên kiểm tra lại
-# Vị trí dải ô viết trong khung Phần III (tỉ lệ theo khung) - dùng khi không dò được viền
+# Vị trí dải 4 ô viết tay trong khung (tỉ lệ theo khung) - chỉ để cắt ảnh đối chiếu / ghi nhãn
 HW_STRIP_UV = (0.252, 0.086, 0.610, 0.080)   # u0, v0, rộng, cao
-_net = None
+P3_MINUS = 0                                  # chỉ số ô "-" trong P3_CELLS
+P3_COLS = [[i for i, (s, c) in enumerate(P3_CELLS) if c == col and s != "-"] for col in range(4)]
 
 
-def _digit_net():
-    global _net
-    if _net is None:
-        if not os.path.isfile(MODEL_PATH):
-            raise SheetError(f"Thiếu file mô hình nhận dạng chữ số: {MODEL_PATH}")
-        with open(MODEL_PATH, "rb") as f:  # đọc qua bộ nhớ: an toàn với đường dẫn có dấu
-            import io
-            _net = dict(np.load(io.BytesIO(f.read())))
-    return _net
-
-
-def _conv_same(x, w, b):
-    """Tích chập 5x5 'SAME' cho lô ảnh x (N,C,H,W) với w (K,C,5,5)."""
-    k = w.shape[-1]
-    p = k // 2
-    xp = np.pad(x, ((0, 0), (0, 0), (p, p), (p, p)))
-    win = np.lib.stride_tricks.sliding_window_view(xp, (k, k), axis=(2, 3))  # N,C,H,W,k,k
-    return np.einsum("nchwij,kcij->nkhw", win, w, optimize=True) + b[None, :, None, None]
-
-
-def _maxpool(x, s):
-    n, c, h, w = x.shape
-    h2, w2 = h // s, w // s
-    return x[:, :, :h2 * s, :w2 * s].reshape(n, c, h2, s, w2, s).max(axis=(3, 5))
-
-
-def _mnist_logits(batch):
-    """Mạng MNIST (Conv-ReLU-Pool2, Conv-ReLU-Pool3, FC) cho lô ảnh (N,28,28) giá trị 0..1."""
-    W = _digit_net()
-    x = batch.reshape(-1, 1, 28, 28).astype(np.float32)
-    x = _maxpool(np.maximum(_conv_same(x, W["w1"], W["b1"]), 0), 2)
-    x = _maxpool(np.maximum(_conv_same(x, W["w2"], W["b2"]), 0), 3)
-    return x.reshape(len(x), -1) @ W["w3"] + W["b3"]
+def _p3_cell_name(i):
+    s, c = P3_CELLS[i]
+    return "dấu trừ" if s == "-" else (f"dấu phẩy cột {c + 1}" if s == "," else f"số {s} cột {c + 1}")
 
 
 def _locate_strip(img, box):
@@ -493,156 +465,37 @@ def _locate_strip(img, box):
     return (x + best[0], y0 + best[1], best[2], best[3])
 
 
-def _refine_lines(profile, expected, win):
-    """Dời vị trí đường viền dự kiến tới chỗ tối nhất lân cận trong hồ sơ độ tối."""
-    out = []
-    for e in expected:
-        lo, hi = max(int(e) - win, 0), min(int(e) + win + 1, len(profile))
-        out.append(lo + int(np.argmax(profile[lo:hi])) if hi > lo else int(e))
-    return out
-
-
-def _to_mnist(cell, box=20, dil=2, angle=0.0):
-    """Chuẩn hoá vết mực của 1 ô về ảnh 28x28 kiểu MNIST (chữ trắng nền đen, giá trị 0..1)."""
-    ys, xs = np.nonzero(cell > 0)
-    c = cell[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype(np.float32)
-    c = c / max(float(c.max()), 1.0) * 255.0
-    if dil:
-        c = cv2.dilate(c, np.ones((dil, dil), np.uint8))
-    if angle:
-        pad = max(c.shape) // 3
-        c = cv2.copyMakeBorder(c, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
-        M = cv2.getRotationMatrix2D((c.shape[1] / 2, c.shape[0] / 2), angle, 1.0)
-        c = cv2.warpAffine(c, M, (c.shape[1], c.shape[0]))
-        ys, xs = np.nonzero(c > 20)
-        c = c[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
-    h, w = c.shape
-    s = box / max(h, w)
-    c = cv2.resize(c, (max(1, round(w * s)), max(1, round(h * s))), interpolation=cv2.INTER_AREA)
-    canvas = np.zeros((28, 28), np.float32)
-    h, w = c.shape
-    oy, ox = (28 - h) // 2, (28 - w) // 2
-    canvas[oy:oy + h, ox:ox + w] = c
-    m = cv2.moments(canvas)
-    if m["m00"] > 0:  # căn giữa theo trọng tâm như dữ liệu MNIST
-        M = np.float32([[1, 0, 14 - m["m10"] / m["m00"]], [0, 1, 14 - m["m01"] / m["m00"]]])
-        canvas = cv2.warpAffine(canvas, M, (28, 28))
-    return canvas / 255.0
-
-
-# Các biến thể (cỡ chữ, độ đậm nét, góc nghiêng) để lấy trung bình -> ổn định hơn và
-# cho độ tin cậy có ý nghĩa (chữ viết lạ / mơ hồ sẽ có độ tin cậy thấp)
-_TTA = [(b, d, a) for b in (18, 20, 22) for d in (1, 2, 3) for a in (-10.0, 0.0, 10.0)]
-
-
-def _classify_digit(cell):
-    z = _mnist_logits(np.stack([_to_mnist(cell, *v) for v in _TTA])).astype(np.float64)
-    p = np.exp(z - z.max(1, keepdims=True))
-    p = (p / p.sum(1, keepdims=True)).mean(0)
-    order = np.argsort(p)[::-1]
-    return str(int(order[0])), float(p[order[0]]), str(int(order[1]))
-
-
-def _strip_lines(cell, rows, cols, ci, win=3):
-    """Xoá vệt đường viền ô còn dính vào nét chữ (hàng/cột mực chạy gần hết bề rộng ô)."""
-    x0, x1 = cols[ci], cols[ci + 1]
-    cw, ch = x1 - x0, rows[1] - rows[0]
-    for yy in rows:
-        for y in range(max(yy - win, 0), min(yy + win + 1, cell.shape[0])):
-            if np.count_nonzero(cell[y, x0:x1]) > 0.6 * cw:
-                cell[y, :] = 0
-    for xx in cols[ci:ci + 2]:
-        for x in range(max(xx - win, 0), min(xx + win + 1, cell.shape[1])):
-            if np.count_nonzero(cell[rows[0]:rows[1], x]) > 0.6 * ch:
-                cell[:, x] = 0
-    return cell
-
-
-def read_handwritten(img, box):
-    """Đọc đáp án viết tay của 1 câu Phần III. Trả về dict value/valid/conf/cells/strip/crop."""
-    sx, sy, sw, sh = _locate_strip(img, box)
-    my, mx = int(sh * 0.45), int(sh * 0.15)
-    H, W = img.shape[:2]
-    ry0, ry1 = max(sy - my, 0), min(sy + sh + my, H)
-    rx0, rx1 = max(sx - mx, 0), min(sx + sw + mx, W)
-    reg_bgr = img[ry0:ry1, rx0:rx1]
-    # Kênh đỏ: viền ô in màu hồng/đỏ nhạt đi nhiều, nét bút xanh/đen/chì vẫn đậm
-    red = reg_bgr[:, :, 2].astype(np.float32)
-    bg = cv2.medianBlur(reg_bgr[:, :, 2], 21).astype(np.float32)
-    ink = np.clip(bg - red, 0, 255)
-    gray_dark = np.clip(cv2.medianBlur(cv2.cvtColor(reg_bgr, cv2.COLOR_BGR2GRAY), 21).astype(np.float32)
-                        - cv2.cvtColor(reg_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32), 0, 255)
-
-    # Vị trí thật của các đường viền (2 ngang, 5 dọc) để loại bỏ chúng
-    top, bot = sy - ry0, sy + sh - ry0
-    left = sx - rx0
-    cw = sw / 4.0
-    rows = _refine_lines(gray_dark[:, left:left + sw].mean(1), [top, bot], 5)
-    cols = _refine_lines(gray_dark[top:bot, :].mean(0), [left + k * cw for k in range(5)], 5)
-    band = np.zeros(ink.shape, bool)
-    for yy in rows:
-        band[max(yy - 2, 0):yy + 3, :] = True
-    for xx in cols:
-        band[:, max(xx - 2, 0):xx + 3] = True
-
-    T = max(38.0, 0.2 * float(np.median(bg)))
-    strong = (ink > T) & (~band | (ink > 1.6 * T))
-    weak = (ink > 0.5 * T) & (~band | (ink > 1.6 * T))
-    n, lab, stats, cent = cv2.connectedComponentsWithStats(weak.astype(np.uint8), connectivity=8)
-    has_strong = np.zeros(n, bool)
-    has_strong[np.unique(lab[strong])] = True
-
-    top, bot = rows
-    cell_h = bot - top
-    cells = [np.zeros_like(ink) for _ in range(4)]
-    for i in range(1, n):
-        x, y, w, h, area = stats[i]
-        if not has_strong[i] or area < 4:
-            continue
-        if y + h <= top + 2 or y >= bot - 2:          # nằm hẳn ngoài dải ô (chữ "Câu", vết bẩn)
-            continue
-        if w > 0.8 * cw and h < 0.15 * cell_h:        # mẩu đường viền ngang còn sót
-            continue
-        ci = int(np.searchsorted(cols, cent[i][0]) - 1)
-        if 0 <= ci < 4:
-            m = lab == i
-            cells[ci][m] = ink[m]
-
-    # Thống kê từng ô có mực: chiều cao/rộng/vị trí của nét
-    glyphs = []
-    for ci, c in enumerate(cells):
-        c = _strip_lines(c, rows, cols, ci)
-        ys, xs = np.nonzero(c)
-        if len(ys) < 8 or (np.ptp(ys) < 3 and np.ptp(xs) < 3):
-            glyphs.append(None)
-            continue
-        glyphs.append({"cell": c, "h": ys.max() - ys.min() + 1, "w": xs.max() - xs.min() + 1,
-                       "cy": (ys.min() + ys.max()) / 2 - top, "bottom": ys.max() - top})
-    # Chiều cao chuẩn của chữ số trong câu này (để nhận ra dấu "," và "-" nhỏ hơn hẳn)
-    tall = [g["h"] for g in glyphs if g and g["h"] > 0.4 * cell_h]
-    ref_h = float(np.median(tall)) if tall else 0.75 * cell_h
-    out = []
-    for g in glyphs:
-        if g is None:
-            out.append({"char": "", "conf": 1.0, "alt": None})
-        elif g["h"] < 0.35 * ref_h and g["w"] > 1.4 * g["h"] and 0.2 * cell_h < g["cy"] < 0.8 * cell_h:
-            out.append({"char": "-", "conf": 1.0, "alt": None})
-        elif g["h"] < 0.6 * ref_h and g["w"] < 0.6 * ref_h and g["cy"] > 0.5 * cell_h:
-            out.append({"char": ",", "conf": 1.0, "alt": None})
+def read_p3(img, red, box, circles, r, delta):
+    """Đọc bài làm 1 câu Phần III từ các ô tròn đã tô.
+    Mỗi cột (4 cột) là 1 ký tự: chữ số 0..9, hoặc dấu phẩy (cột 2, 3). Ô "-" đánh dấu số âm."""
+    pts = _place(box, P3_UV, circles, r)
+    sc = _fill_scores(_darkness(red, pts, r), pts, delta)
+    minus, faint = _decide(sc, [P3_MINUS], delta)
+    filled = list(minus)
+    chars, multi = [], []
+    for col, idx in enumerate(P3_COLS):
+        f, fa = _decide(sc, idx, delta)
+        faint += fa
+        filled += f
+        if len(f) == 1:
+            chars.append(P3_CELLS[f[0]][0])
+        elif f:
+            chars.append("*")
+            multi.append((col, f))
         else:
-            d, p, alt = _classify_digit(g["cell"])
-            out.append({"char": d, "conf": p, "alt": alt})
-
-    chars = [o["char"] for o in out]
-    value = "".join(chars).replace(".", ",")
-    filled = [i for i, ch in enumerate(chars) if ch]
-    gap = bool(filled) and (filled[-1] - filled[0] + 1) != len(filled)   # có ô trống ở giữa
-    valid = bool(re.fullmatch(r"-?\d*,?\d+", value)) and not gap
-    conf = min([o["conf"] for o in out if o["char"]], default=1.0)
-    crop = img[max(sy - int(0.25 * sh), 0):min(sy + sh + int(0.35 * sh), H),
+            chars.append("")
+    used = [i for i, ch in enumerate(chars) if ch]
+    gap = bool(used) and (used[-1] - used[0] + 1) != len(used)     # cột trống xen giữa
+    value = ("-" if minus else "") + "".join(chars)
+    valid = bool(re.fullmatch(r"-?\d*,?\d+", value)) and not gap and not multi
+    sx, sy, sw, sh = _locate_strip(img, box)
+    H, W = img.shape[:2]
+    mx = int(0.15 * sh)
+    crop = img[max(sy - int(0.25 * sh), 0):min(sy + sh + int(0.2 * sh), H),
                max(sx - mx, 0):min(sx + sw + mx, W)].copy()
-    return {"value": value, "valid": valid, "conf": conf, "cells": out, "box": box,
-            "strip": (sx, sy, sw, sh), "crop": crop}
+    return {"value": value, "valid": valid, "conf": 0.5 if (faint or multi or (value and not valid)) else 1.0,
+            "pts": pts, "scores": sc, "filled": sorted(filled), "faint": sorted(set(faint)),
+            "multi": multi, "gap": gap, "box": box, "strip": (sx, sy, sw, sh), "crop": crop}
 
 
 # ----------------------------------------------------------------------------
@@ -860,15 +713,15 @@ def annotate(res, graded=None):  # noqa: C901
         g = g3.get(it["q"])
         value = g["student"] if g else it["value"]
         color = BLUE if g is None else (GREEN if g["ok"] else (RED if value else ORANGE))
-        sx, sy, sw, sh = it["strip"]
-        cv2.rectangle(img, (sx - 3, sy - 3), (sx + sw + 3, sy + sh + 3), color, 3, cv2.LINE_AA)
+        for i in it["filled"]:                       # các ô tròn thí sinh đã tô
+            _ring(img, it["pts"][i], r, color, 4 if g is not None else 3)
+        x, y, w, h = it["box"]
         if g is not None:
-            x, y, w, h = it["box"]
             cv2.rectangle(img, (x, y), (x + w, y + h), color, 4, cv2.LINE_AA)
-        # ghi giá trị đọc được (chỉ ký tự ASCII: số, "-", ",") ngay dưới dải ô viết
+        # ghi giá trị đọc được (chỉ ký tự ASCII: số, "-", ",") ở góc trên bên phải khung
         label = value if value else "(trong)"
-        cv2.putText(img, label, (sx, sy + sh + int(0.75 * sh)), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                    (255, 255, 255), 5, cv2.LINE_AA)
-        cv2.putText(img, label, (sx, sy + sh + int(0.75 * sh)), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                    color, 2, cv2.LINE_AA)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        org = (x + w - tw - 8, y + int(0.02 * h) + th + 4)
+        cv2.putText(img, label, org, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 5, cv2.LINE_AA)
+        cv2.putText(img, label, org, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
     return img
