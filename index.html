@@ -26,6 +26,7 @@
 <main>
   <!-- ============ CHẤM ============ -->
   <section class="view active" id="view-scan">
+    <div class="formsel" data-formsel></div>
     <div class="card key-banner" id="key-banner"></div>
 
     <div class="card capture">
@@ -68,6 +69,7 @@
 
   <!-- ============ ĐÁP ÁN ============ -->
   <section class="view" id="view-keys">
+    <div class="formsel" data-formsel></div>
     <div class="card hint">
       Mỗi mã đề một bộ đáp án. Khi chấm, ứng dụng <b>tự chọn đúng bộ đáp án</b> theo mã đề tô trên phiếu.
     </div>
@@ -96,6 +98,8 @@
       <h3>Thang điểm</h3>
       <label class="field"><span>Phần I – điểm mỗi câu</span>
         <input type="text" inputmode="decimal" id="set-p1"></label>
+      <label class="field"><span>Form tiếng Anh – điểm mỗi câu</span>
+        <input type="text" inputmode="decimal" id="set-p1en"></label>
       <label class="field"><span>Phần III – điểm mỗi câu</span>
         <select id="set-p3"><option value="0.25">0,25 (các môn)</option><option value="0.5">0,5 (Toán)</option></select></label>
       <div class="field"><span>Phần II – điểm theo số ý đúng</span>

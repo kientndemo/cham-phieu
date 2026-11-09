@@ -1,6 +1,7 @@
 """
 Lõi nhận dạng & chấm phiếu trả lời trắc nghiệm mẫu THPT
-(Số báo danh 6 số, Mã đề 3 số, Phần I 40 câu A-D, Phần II 8 câu Đúng/Sai, Phần III 6 câu điền số).
+Form mặc định: Số báo danh 6 số, Mã đề 3 số, Phần I 40 câu A-D, Phần II 8 câu Đúng/Sai, Phần III 6 câu điền số.
+Form tiếng Anh: Số báo danh 6 số, Mã đề 3 số, 50 câu A-D.
 
 Dùng chung cho giao diện (app.py) và dòng lệnh (cham_phieu.py).
 """
@@ -17,6 +18,9 @@ LETTERS = "ABCD"
 TF = "ĐS"                  # Đúng / Sai
 SUB_ITEMS = "abcd"         # các ý của câu Phần II
 P2_DEFAULT = [0.0, 0.1, 0.25, 0.5, 1.0]   # điểm Phần II theo số ý đúng (0..4) - quy chế THPT
+# Các kiểu phiếu: số câu tối đa của từng phần (0 = kiểu phiếu không có phần đó)
+FORMS = {"default": {"label": "Form mặc định", "limits": {"p1": 40, "p2": 8, "p3": 6}},
+         "english": {"label": "Form tiếng Anh", "limits": {"p1": 50, "p2": 0, "p3": 0}}}
 
 
 class SheetError(Exception):
@@ -50,7 +54,11 @@ def _place(box, uv, circles, r):
     """Đặt khuôn mẫu vào khung rồi khớp affine với các ô tròn phát hiện được,
     nên vẫn đúng vị trí kể cả khi một số ô không phát hiện được (ảnh tối, mờ)."""
     x, y, w, h = box
-    T = np.c_[x + uv[:, 0] * w, y + uv[:, 1] * h]
+    return _refine(np.c_[x + uv[:, 0] * w, y + uv[:, 1] * h], circles, r)
+
+
+def _refine(T, circles, r):
+    """Khớp affine các điểm khuôn T với ô tròn phát hiện được rồi hút về tâm ô tròn gần nhất."""
     A = np.c_[T, np.ones(len(T))]
     pts = T.copy()
     for tol in (r * 1.6, r * 1.1, r * 0.8):
@@ -73,10 +81,10 @@ def _normalize(image):
     return cv2.resize(image, None, fx=s, fy=s, interpolation=interp)
 
 
-def _detect_bubbles(gray):
+def _detect_bubbles(gray, param1=80, param2=18):
     g = cv2.medianBlur(gray, 5)
     cs = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1, minDist=18,
-                          param1=80, param2=18, minRadius=7, maxRadius=14)
+                          param1=param1, param2=param2, minRadius=7, maxRadius=14)
     return np.zeros((0, 3)) if cs is None else cs[0]
 
 
@@ -215,8 +223,10 @@ def _snap(pts, circles, tol):
     return out
 
 
-def _darkness(channel, pts, r):
-    """Độ tối trung bình bên trong từng ô tròn (0 = trắng, 255 = đen)."""
+def _darkness(channel, pts, r, robust=False):
+    """Độ tối bên trong từng ô tròn (0 = trắng, 255 = đen).
+    robust=True: chỉ xét phần sáng của ô (bách phân vị 65) để bỏ qua chữ cái in đậm trong ô tròn;
+    vết tô phủ kín ô nên vẫn tối."""
     rr = max(int(r * 0.65), 3)
     yy, xx = np.mgrid[-rr:rr + 1, -rr:rr + 1]
     disk = (xx ** 2 + yy ** 2) <= rr ** 2
@@ -228,11 +238,11 @@ def _darkness(channel, pts, r):
             vals.append(0.0)
             continue
         patch = channel[y - rr:y + rr + 1, x - rr:x + rr + 1]
-        vals.append(255.0 - float(patch[disk].mean()))
+        vals.append(255.0 - float(np.percentile(patch[disk], 65) if robust else patch[disk].mean()))
     return np.array(vals)
 
 
-def _fill_scores(vals, pts, delta):
+def _fill_scores(vals, pts, delta, keep=0.5):
     """Trừ đi "nền" (mặt cong bậc 2 khớp theo các ô trống) để khử ánh sáng không đều.
     Trả về độ tối vượt nền của từng ô."""
     vals = np.asarray(vals, float)
@@ -242,7 +252,7 @@ def _fill_scores(vals, pts, delta):
     A = np.c_[np.ones_like(x), x, y, x * y, x * x, y * y]
     if len(vals) < 12:
         A = A[:, :3]
-    mask = vals <= np.median(vals)          # nửa sáng hơn chắc chắn là ô trống
+    mask = vals <= np.quantile(vals, keep)  # phần sáng hơn chắc chắn là ô trống (mặc định: một nửa)
     coef = None
     for _ in range(6):
         if mask.sum() < A.shape[1] + 1:
@@ -271,21 +281,24 @@ def _decide(scores, idx, delta):
 # ----------------------------------------------------------------------------
 # Nhận dạng phiếu
 # ----------------------------------------------------------------------------
-def read_sheet(image, delta=FILL_DELTA):
-    """Đọc bài làm từ ảnh BGR. Tự thử xoay ảnh nếu phiếu bị chụp ngang/ngược."""
+def read_sheet(image, delta=FILL_DELTA, form="default"):
+    """Đọc bài làm từ ảnh BGR theo kiểu phiếu `form` (xem FORMS).
+    Tự thử xoay ảnh nếu phiếu bị chụp ngang/ngược."""
+    reader = _read_english if form == "english" else _read
     err = None
     for boost in (False, True):   # lần 2: tăng tương phản (ảnh chụp dư sáng làm ô in hồng bị nhạt)
         for rot in (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_180):
             img = image if rot is None else cv2.rotate(image, rot)
             try:
-                res = _read(_normalize(img), delta, boost)
+                res = reader(_normalize(img), delta, boost)
             except SheetError as e:
                 err = err or e
                 continue
             if res["upright"]:
                 return res
             err = err or SheetError("Phiếu có vẻ bị ngược chiều.")
-    raise err or SheetError("Không nhận dạng được phiếu.")
+    raise SheetError(f"{err or 'Không nhận dạng được phiếu.'} "
+                     f"Kiểm tra lại: đang chọn {FORMS[form]['label']} — có đúng với tờ phiếu này không?")
 
 
 def _read(img, delta, boost=False):
@@ -409,13 +422,7 @@ def _read(img, delta, boost=False):
                                 f"{', '.join(_p3_cell_name(i) for i in it['faint'])} — nên kiểm tra lại.")
             part3.append(it)
 
-    for it in part1:
-        if it["multi"]:
-            warnings.append(f"Phần I câu {it['q']}: tô nhiều ô ({', '.join(LETTERS[j] for j in it['filled'])}).")
-        if it["faint"]:
-            chosen = f", máy chọn {it['answer']}" if it["answer"] else ""
-            warnings.append(f"Phần I câu {it['q']}: có vết tô mờ ở ô {', '.join(LETTERS[j] for j in it['faint'])}"
-                            f"{chosen} — nên kiểm tra lại.")
+    _warn_abcd(part1, "Phần I câu", warnings)
     for it in part2:
         for s, sub in zip(SUB_ITEMS, it["items"]):
             if sub["multi"]:
@@ -427,6 +434,17 @@ def _read(img, delta, boost=False):
     return {"image": img, "r": r, "sbd": sbd, "made": made, "id_cols": id_cols,
             "part1": part1, "part2": part2, "part3": part3,
             "warnings": warnings, "upright": upright}
+
+
+def _warn_abcd(items, name, warnings):
+    """Cảnh báo các câu A-D tô nhiều ô / có vết tô mờ."""
+    for it in items:
+        if it["multi"]:
+            warnings.append(f"{name} {it['q']}: tô nhiều ô ({', '.join(LETTERS[j] for j in it['filled'])}).")
+        if it["faint"]:
+            chosen = f", máy chọn {it['answer']}" if it["answer"] else ""
+            warnings.append(f"{name} {it['q']}: có vết tô mờ ở ô {', '.join(LETTERS[j] for j in it['faint'])}"
+                            f"{chosen} — nên kiểm tra lại.")
 
 
 # ----------------------------------------------------------------------------
@@ -499,6 +517,194 @@ def read_p3(img, red, box, circles, r, delta):
 
 
 # ----------------------------------------------------------------------------
+# Form tiếng Anh: 50 câu A-D, chia 2 cột, mỗi cột 5 ô, mỗi ô 5 câu
+# ----------------------------------------------------------------------------
+EN_UV = _uv([0.249, 0.472, 0.694, 0.917], [0.162, 0.331, 0.500, 0.667, 0.836])   # tâm ô tròn trong 1 ô 5 câu
+EN_COL_STEP = 1.322         # khoảng cách 2 cột / chiều rộng 1 ô
+# Khung tô SBD / Mã đề so với ô trả lời đầu cột phải (x, độ rộng tính theo độ rộng ô; y, độ cao tính theo bước hàng)
+EN_ID_FRAMES = ((0.586, -2.918, 0.455, 2.126, 6), (1.168, -2.918, 0.235, 2.126, 3))
+EN_MARK_RATIO = 0.5         # ô được tính là đã tô nếu đậm từ 50% độ đậm vết tô điển hình của tờ phiếu
+EN_MIN_MATCH = 60           # số ô tròn tối thiểu (trên 200) khớp khuôn để coi là đúng kiểu phiếu
+
+
+def _id_uv(ncols):
+    return _uv([(c + 0.5) / ncols for c in range(ncols)], [(k + 0.5) / 10 for k in range(10)])
+
+
+def _en_match(b, circles, r):
+    """Số ô tròn phát hiện được khớp khuôn 20 ô của một ô trả lời đặt tại b."""
+    T = np.c_[b[0] + EN_UV[:, 0] * b[2], b[1] + EN_UV[:, 1] * b[3]]
+    d = np.hypot(T[:, None, 0] - circles[None, :, 0], T[:, None, 1] - circles[None, :, 1])
+    return int((d.min(1) < 0.9 * r).sum())
+
+
+def _en_cells(boxes, circles, r):
+    """Các ô 5 câu phát hiện được; khung cả cột (nếu có) được chia đều thành 5 ô."""
+    cells = [b for b in boxes if 0.42 < b[3] / b[2] < 0.66 and 250 < b[2] < 560 and _en_match(b, circles, r) >= 5]
+    for x, y, w, h in boxes:
+        if 2.3 < h / w < 2.95 and 250 < w < 560:
+            parts = [(x, int(y + k * h / 5), w, int(h / 5)) for k in range(5)]
+            if sum(_en_match(c, circles, r) for c in parts) >= 25:
+                cells += [c for c in parts
+                          if not any(abs(c[0] - o[0]) < 0.2 * w and abs(c[1] - o[1]) < 0.2 * c[3] for o in cells)]
+    return cells
+
+
+def _en_layout(cells, circles, r, width):
+    """Suy ra đủ 10 ô (2 cột x 5 hàng) từ những ô phát hiện được, vì nét in mờ có thể làm mất vài ô.
+    Khi chưa rõ ô nằm ở hàng/cột nào thì thử các khả năng và chọn cách khớp nhiều ô tròn nhất."""
+    if len(cells) < 2:
+        raise SheetError("Không tìm thấy các khung câu trả lời của phiếu. Hãy chụp thẳng, rõ nét, lấy trọn tờ phiếu.")
+    P = np.array([(b[0], b[1]) for b in cells], float)
+    w, h = float(np.median([b[2] for b in cells])), float(np.median([b[3] for b in cells]))
+    two_cols = np.ptp(P[:, 0]) > 0.7 * w
+    rows0 = np.round((P[:, 1] - P[:, 1].min()) / h).astype(int)
+    if rows0.max() > 4:
+        raise SheetError("Các khung câu trả lời không đúng bố cục của phiếu.")
+    if two_cols:
+        col_options = [(P[:, 0] > (P[:, 0].min() + P[:, 0].max()) / 2).astype(int)]
+    else:
+        guess = int(P[0, 0] + w / 2 > width / 2)
+        col_options = [np.full(len(P), guess), np.full(len(P), 1 - guess)]
+
+    best, best_score = None, -1
+    for col in col_options:
+        for shift in range(5 - rows0.max()):
+            row = rows0 + shift
+            terms = [np.ones(len(P))] + ([col] if two_cols else []) + ([row] if np.ptp(row) else [])
+            sol = np.linalg.lstsq(np.c_[tuple(terms)], P, rcond=None)[0]
+            rv = sol[-1] if np.ptp(row) else None
+            cv = sol[1] if two_cols else None
+            if cv is None and rv is None:
+                continue
+            if cv is None:
+                cv = np.array([rv[1], -rv[0]]) / np.hypot(*rv) * EN_COL_STEP * w
+            if rv is None:
+                rv = np.array([-cv[1], cv[0]]) / np.hypot(*cv) * h
+            origin = sol[0] - (0 if two_cols else col[0] * cv)
+            if not np.ptp(row):
+                origin = origin - row[0] * rv
+            boxes, score = [], 0
+            for c in range(2):
+                for k in range(5):
+                    px, py = origin + c * cv + k * rv
+                    near = [b for b in cells if abs(b[0] - px) < 0.2 * w and abs(b[1] - py) < 0.2 * h]
+                    b = near[0] if near else (int(round(px)), int(round(py)), int(round(w)), int(round(h)))
+                    boxes.append(b)
+                    score += _en_match(b, circles, r)
+            if score > best_score:
+                best, best_score = boxes, score
+    if best is None or best_score < EN_MIN_MATCH:
+        raise SheetError("Không tìm thấy các ô trả lời của phiếu. Hãy chụp thẳng, rõ nét, lấy trọn tờ phiếu.")
+    return best
+
+
+def _en_id_grids(layout, circles, r):
+    """Lưới ô tròn SBD (6 cột) và Mã đề (3 cột), suy từ các ô trả lời nên đúng cả khi ảnh nghiêng
+    và khi nét khung quá mờ. Cả 90 ô được dò dịch chuyển chung: lệch 1 hàng/cột sẽ khớp kém hẳn."""
+    L = np.array([(b[0], b[1]) for b in layout], float)
+    # lấy kích thước từ bước lưới: ảnh nghiêng làm khung bao của ô to ra, bước lưới thì không đổi
+    w = float(np.hypot(*(L[5] - L[0]))) / EN_COL_STEP
+    h = float(np.hypot(*(L[4] - L[0]))) / 4
+    ux = (L[5] - L[0]) / (w * EN_COL_STEP)
+    uy = (L[4] - L[0]) / (h * 4)
+    grids, ghosts = [], []
+    for a, b, fw, fh, ncols in EN_ID_FRAMES:
+        O = L[5] + a * w * ux + b * h * uy
+        place = lambda u, v: O + u[:, None] * fw * w * ux + v[:, None] * fh * h * uy
+        uv = _id_uv(ncols)
+        grids.append(place(uv[:, 0], uv[:, 1]))
+        # "hàng/cột ma" sát ngoài lưới: đặt đúng thì ở đó không có ô tròn, lệch 1 hàng/cột thì có
+        us, vs = (np.arange(-1, ncols + 1) + 0.5) / ncols, (np.arange(-1, 11) + 0.5) / 10
+        edge = _uv(us, vs)
+        keep = (edge[:, 0] < 0) | (edge[:, 0] > 1) | (edge[:, 1] < 0) | (edge[:, 1] > 1)
+        ghosts.append(place(edge[keep, 0], edge[keep, 1]))
+    T, G = np.vstack(grids), np.vstack(ghosts)
+    # Thử đồng loạt nhiều vị trí và tỉ lệ (chụp chếch làm phần trên tờ phiếu co lại) trên bản đồ
+    # "có ô tròn" để vẫn nhanh trên điện thoại
+    H, W = int(circles[:, 1].max() + 200), int(circles[:, 0].max() + 200)
+    occupied = np.zeros((H, W), np.int32)
+    for cx, cy in circles[:, :2]:
+        cv2.circle(occupied, (int(cx), int(cy)), int(0.8 * r), 1, -1)
+    occupied[[0, -1], :] = 0
+    occupied[:, [0, -1]] = 0
+    dx, dy = (a.ravel() for a in np.meshgrid(np.arange(-80, 81, 3), np.arange(-80, 81, 3)))
+
+    def hits(P):
+        x = np.clip(np.round(P[:, 0][None] + dx[:, None]).astype(int), 0, W - 1)
+        y = np.clip(np.round(P[:, 1][None] + dy[:, None]).astype(int), 0, H - 1)
+        return occupied[y, x].sum(1)
+
+    center = T.mean(0)
+    best, chosen = -1e9, (np.ones(2), np.zeros(2))
+    for sx in (0.96, 1.0, 1.03):
+        for sy in (0.90, 0.93, 0.96, 1.0, 1.03):
+            scale = np.array([sx, sy])
+            n = hits(center + (T - center) * scale) - hits(center + (G - center) * scale) - 1e-3 * np.hypot(dx, dy)
+            i = int(np.argmax(n))
+            if n[i] > best:
+                best, chosen = float(n[i]), (scale, np.array([dx[i], dy[i]], float))
+    scale, shift = chosen
+    return [_refine(center + (g - center) * scale + shift, circles, r) for g in grids]
+
+
+def _read_english(img, delta, boost=False):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    green = img[:, :, 1]                 # nét in màu hồng của ô tròn nổi rõ nhất ở kênh xanh lá
+    if boost:
+        gray = (255.0 * (gray / 255.0) ** 2).astype(np.uint8)
+        green = (255.0 * (green / 255.0) ** 2).astype(np.uint8)
+    red = img[:, :, 2]                   # kênh đỏ: nét in hồng biến mất, vết bút chì vẫn tối
+    circles = _detect_bubbles(green, 50, 14)
+    if len(circles) < EN_MIN_MATCH:
+        raise SheetError("Không tìm thấy các ô tròn trên phiếu. Hãy chụp rõ, đủ sáng và lấy trọn tờ phiếu.")
+    r = float(np.median(circles[:, 2]))
+
+    boxes = _find_boxes(green if boost else gray)
+    width = img.shape[1]
+    layout = _en_layout(_en_cells(boxes, circles, r), circles, r, width)
+    top = min(b[1] for b in layout)
+    # Phiếu đúng chiều: vùng tô SBD / Mã đề nằm phía trên, bên phải các ô trả lời
+    upright = int(((circles[:, 1] < top) & (circles[:, 0] > 0.55 * width)).sum()) >= 30
+
+    grids = [_place(b, EN_UV, circles, r).reshape(5, 4, 2) for b in layout]
+    scores = [_fill_scores(_darkness(red, g, r, robust=True), g, delta, keep=0.75).reshape(5, 4) for g in grids]
+    # Ngưỡng theo độ đậm thật của bút chì trên chính tờ phiếu (ảnh mờ làm ô trống có chữ cái tối lên)
+    tops = np.concatenate([sc.max(1) for sc in scores])
+    tops = tops[tops > delta]
+    if len(tops) >= 5:
+        delta = delta * max(1.0, EN_MARK_RATIO * float(np.median(tops)) / FILL_DELTA)
+
+    part1 = []
+    for bi, (grid, sc) in enumerate(zip(grids, scores)):
+        for ri in range(5):
+            filled, faint = _decide(sc[ri], range(4), delta)
+            part1.append({"q": bi * 5 + ri + 1, "pts": grid[ri], "scores": sc[ri],
+                          "filled": filled, "faint": faint,
+                          "answer": LETTERS[filled[0]] if len(filled) == 1 else None,
+                          "multi": len(filled) > 1})
+
+    warnings, id_cols, parts = [], [], []
+    for pts, (*_, ncols) in zip(_en_id_grids(layout, circles, r), EN_ID_FRAMES):
+        grid = pts.reshape(10, ncols, 2)
+        sc = _fill_scores(_darkness(red, grid, r, robust=True), grid, delta).reshape(10, ncols)
+        digits = []
+        for ci in range(ncols):
+            filled, _ = _decide(sc[:, ci], range(10), delta)
+            id_cols.append({"pts": grid[:, ci], "filled": filled})
+            digits.append(str(filled[0]) if len(filled) == 1 else ("*" if filled else "?"))
+        parts.append("".join(digits))
+    sbd, made = parts
+    if sbd and ("?" in sbd or "*" in sbd):
+        warnings.append(f"Số báo danh chưa tô đủ/hợp lệ: {sbd} (? = cột bỏ trống, * = tô nhiều ô).")
+    if made and ("?" in made or "*" in made):
+        warnings.append(f"Mã đề chưa tô đủ/hợp lệ: {made}.")
+    _warn_abcd(part1, "Câu", warnings)
+    return {"image": img, "r": r, "sbd": sbd, "made": made, "id_cols": id_cols,
+            "part1": part1, "part2": [], "part3": [], "warnings": warnings, "upright": upright}
+
+
+# ----------------------------------------------------------------------------
 # Đáp án
 # ----------------------------------------------------------------------------
 KEY_TEMPLATE = """MÃ ĐỀ: 104
@@ -524,8 +730,8 @@ def _ascii_upper(text):
     return unicodedata.normalize("NFC", text).upper()
 
 
-def parse_key(text):
-    """Đọc bộ đáp án dạng văn bản. Trả về dict {made, p1, p2, p3}."""
+def parse_key(text, form="default"):
+    """Đọc bộ đáp án dạng văn bản theo kiểu phiếu `form`. Trả về dict {made, p1, p2, p3}."""
     text = _ascii_upper(text or "")
     key = {"made": None, "p1": {}, "p2": {}, "p3": {}}
     m = re.search(r"M[ÃA]\s*Đ[ỀE]\s*(?:THI)?\s*[:=]?\s*(\d{1,4})", text)
@@ -574,10 +780,14 @@ def parse_key(text):
             for i, v in enumerate(re.findall(val, re.sub(r"CÂU|CAU", "", s))):
                 key["p3"][i + 1] = v.replace(".", ",")
 
-    for part, n in (("p1", 40), ("p2", 8), ("p3", 6)):
+    limits = FORMS[form]["limits"]
+    for part in ("p1", "p2", "p3"):
+        n = limits[part]
+        name = {"p1": "I", "p2": "II", "p3": "III"}[part]
+        if key[part] and not n:
+            raise KeyFormatError(f"{FORMS[form]['label']} không có Phần {name}, hãy bỏ phần này khỏi đáp án.")
         bad = [q for q in key[part] if not 1 <= q <= n]
         if bad:
-            name = {"p1": "I", "p2": "II", "p3": "III"}[part]
             raise KeyFormatError(f"Phần {name} chỉ có câu 1–{n}, nhưng đáp án có câu {bad[0]}.")
     if not (key["p1"] or key["p2"] or key["p3"]):
         raise KeyFormatError("Chưa đọc được câu nào từ đáp án. Xem phần hướng dẫn định dạng.")

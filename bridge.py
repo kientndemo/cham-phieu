@@ -8,7 +8,7 @@ import numpy as np
 import omr
 
 _store = OrderedDict()      # token -> {"res", "vis"}: giữ vài phiếu gần nhất để sửa/chấm lại nhanh
-_KEEP = 3
+_KEEP = 5
 
 
 def _jsonable(o):
@@ -32,11 +32,11 @@ def has(token):
     return token in _store
 
 
-def process(token, buf, w, h, delta):
+def process(token, buf, w, h, delta, form="default"):
     """Đọc phiếu từ ảnh RGBA (w x h). Trả JSON bài làm; ảnh cắt Phần III lấy qua crop()."""
     img = np.frombuffer(buf.to_bytes(), np.uint8).reshape(h, w, 4)[:, :, 2::-1].copy()
     try:
-        res = omr.read_sheet(img, delta=float(delta))
+        res = omr.read_sheet(img, delta=float(delta), form=form)
     except omr.SheetError as e:
         return _dump({"error": str(e)})
     _store[token] = {"res": res, "vis": None}
@@ -44,7 +44,7 @@ def process(token, buf, w, h, delta):
     while len(_store) > _KEEP:
         _store.popitem(last=False)
     return _dump({
-        "sbd": res["sbd"], "made": res["made"], "warnings": res["warnings"],
+        "sbd": res["sbd"] or "??????", "made": res["made"] or "???", "warnings": res["warnings"],
         "part1": [{"q": it["q"], "answer": it["answer"], "multi": it["multi"]} for it in res["part1"]],
         "part2": [{"q": it["q"], "items": [{"answer": s["answer"], "multi": s["multi"]} for s in it["items"]]}
                   for it in res["part2"]],
@@ -103,10 +103,10 @@ def annotated(token, max_h=1800):
     return _rgba(vis)
 
 
-def parse_key(text):
+def parse_key(text, form="default"):
     """Đọc đáp án dạng chữ (cùng định dạng với bản máy tính)."""
     try:
-        k = omr.parse_key(text)
+        k = omr.parse_key(text, form)
     except omr.KeyFormatError as e:
         return _dump({"error": str(e)})
     return _dump({"made": k["made"], "p1": k["p1"], "p2": k["p2"], "p3": k["p3"]})

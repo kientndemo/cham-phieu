@@ -36,9 +36,9 @@ function toBlob(img, q) {
 
 const handlers = {
   has: ({ token }) => bridge.has(token),
-  async process({ token, rgba, w, h, delta }) {
+  async process({ token, rgba, w, h, delta, form }) {
     const t0 = performance.now();
-    const out = JSON.parse(bridge.process(token, rgba, w, h, delta));
+    const out = JSON.parse(bridge.process(token, rgba, w, h, delta, form));
     if (out.error) return out;
     out.crops = [];
     for (let i = 0; i < out.part3.length; i++) out.crops.push(await toBlob(toImageData(bridge.crop(token, i)), 0.9));
@@ -51,7 +51,7 @@ const handlers = {
     out.image = await toBlob(toImageData(bridge.annotated(token, 1800)), 0.85);
     return out;
   },
-  parseKey: ({ text }) => JSON.parse(bridge.parse_key(text)),
+  parseKey: ({ text, form }) => JSON.parse(bridge.parse_key(text, form)),
 };
 
 // Các lệnh được xử lý lần lượt (bộ chấm dùng chung trạng thái)

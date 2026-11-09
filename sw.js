@@ -1,5 +1,5 @@
 /* Service worker: lưu sẵn ứng dụng + Python/OpenCV để dùng được cả khi không có mạng. */
-const VERSION = "37c4f0768d"; // build_mobile.py tự cập nhật mỗi lần đóng gói
+const VERSION = "44937b98bb"; // build_mobile.py tự cập nhật mỗi lần đóng gói
 const APP_CACHE = "cham-app-" + VERSION;
 const CDN = "https://cdn.jsdelivr.net/pyodide/v0.29.3/full/";
 const CDN_CACHE = "cham-pyodide-v0.29.3";

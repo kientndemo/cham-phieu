@@ -23,6 +23,11 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const normMade = (m) => (m || "").replace(/^0+(?=\d)/, "");
 const validP3 = (v) => /^-?\d*,?\d+$/.test(v);
 const LETTERS = "ABCD";
+const FORMS = {
+  default: { label: "Form mặc định", p1: 40, parts: true },
+  english: { label: "Form tiếng Anh", p1: 50, parts: false },
+};
+const formOf = (x) => (x && x.form) || "default";
 let toastTimer;
 function toast(msg, ms = 2600, onClick) {
   const t = $("#toast");
@@ -38,12 +43,14 @@ const LS = {
   get(k, d) { try { const v = localStorage.getItem("cp_" + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { localStorage.setItem("cp_" + k, JSON.stringify(v)); },
 };
-const DEFAULTS = { p1: 0.25, p3: 0.25, p2: [0, 0.1, 0.25, 0.5, 1], delta: 30, autoKey: true, vibrate: true, continuous: false };
+const DEFAULTS = { p1: 0.25, p1En: 0.25, p3: 0.25, p2: [0, 0.1, 0.25, 0.5, 1], delta: 30, autoKey: true, vibrate: true, continuous: false, form: "default" };
 let settings = Object.assign({}, DEFAULTS, LS.get("settings", {}));
 let keys = LS.get("keys", []);
-let activeKeyId = LS.get("activeKey", null);
+let activeKey = LS.get("activeKey", {});          // bộ đáp án mặc định của từng kiểu phiếu
+if (typeof activeKey === "string" || activeKey === null) activeKey = activeKey ? { default: activeKey } : {};
 const saveSettings = () => LS.set("settings", settings);
-const saveKeys = () => { LS.set("keys", keys); LS.set("activeKey", activeKeyId); };
+const saveKeys = () => { LS.set("keys", keys); LS.set("activeKey", activeKey); };
+const formKeys = (form = settings.form) => keys.filter((k) => formOf(k) === form);
 
 const db = {
   _p: null,
@@ -142,16 +149,33 @@ function openResultView() {
 
 // ============================================================ đáp án đang dùng
 const keyCounts = (k) => ({ p1: Object.keys(k.p1 || {}).length, p2: Object.keys(k.p2 || {}).length, p3: Object.keys(k.p3 || {}).length });
-const keyDesc = (k) => { const c = keyCounts(k); return [c.p1 && `P.I: ${c.p1} câu`, c.p2 && `P.II: ${c.p2} câu`, c.p3 && `P.III: ${c.p3} câu`].filter(Boolean).join(" · ") || "Chưa có câu nào"; };
-function pickKey(made) {
-  if (!keys.length) return null;
+const keyDesc = (k) => {
+  const c = keyCounts(k);
+  if (!FORMS[formOf(k)].parts) return c.p1 ? `${c.p1} câu` : "Chưa có câu nào";
+  return [c.p1 && `P.I: ${c.p1} câu`, c.p2 && `P.II: ${c.p2} câu`, c.p3 && `P.III: ${c.p3} câu`].filter(Boolean).join(" · ") || "Chưa có câu nào";
+};
+function pickKey(made, form = settings.form) {
+  const list = formKeys(form);
+  if (!list.length) return null;
   if (settings.autoKey && made && !made.includes("?")) {
-    const k = keys.find((k) => k.made && normMade(k.made) === normMade(made));
+    const k = list.find((k) => k.made && normMade(k.made) === normMade(made));
     if (k) return k;
   }
-  return keys.find((k) => k.id === activeKeyId) || keys[0];
+  return list.find((k) => k.id === activeKey[form]) || list[0];
 }
-const scoreSettings = () => ({ p1: settings.p1, p2: settings.p2, p3: settings.p3 });
+const scoreSettings = (form) => ({ p1: form === "english" ? settings.p1En : settings.p1, p2: settings.p2, p3: settings.p3 });
+function renderFormSwitch() {
+  $$("[data-formsel]").forEach((el) => el.replaceChildren(...Object.entries(FORMS).map(([id, f]) => h("button", {
+    class: id === settings.form ? "active" : "",
+    onclick: () => {
+      if (settings.form === id) return;
+      settings.form = id; saveSettings();
+      renderFormSwitch(); renderScan();
+      if (curTab === "keys") renderKeys();
+      toast("Đang chấm: " + f.label);
+    },
+  }, f.label))));
+}
 
 // ============================================================ xử lý ảnh -> chấm
 async function prepImage(blob, maxSide = 2600) {
@@ -173,21 +197,27 @@ let pipeline = Promise.resolve();     // các phiếu được chấm lần lư�
 function runJob(fn) { const p = pipeline.then(fn, fn); pipeline = p.catch(() => {}); return p; }
 
 /** Đọc + chấm 1 ảnh. Trả {token, read, graded, p3final, image, key, src} hoặc {error, src}. */
-function gradeSource(src, { token = uid(), override = {} } = {}) {
-  return runJob(async () => {
-    let read = readCache.get(token);
-    let srcJpeg = src;
-    if (!read || !(await engine.call("has", { token }))) {
-      const prep = await prepImage(src);
-      srcJpeg = prep.jpeg;
-      read = await engine.call("process", { token, rgba: prep.rgba, w: prep.w, h: prep.h, delta: settings.delta }, [prep.rgba.buffer]);
-      if (read.error) return { error: read.error, src: srcJpeg, token };
+async function ensureRead(src, token, form) {
+  let read = readCache.get(token);
+  let jpeg = src;
+  if (!read || !(await engine.call("has", { token }))) {
+    const prep = await prepImage(src);
+    jpeg = prep.jpeg;
+    read = await engine.call("process", { token, rgba: prep.rgba, w: prep.w, h: prep.h, delta: settings.delta, form }, [prep.rgba.buffer]);
+    if (!read.error) {
       readCache.set(token, read);
-      if (readCache.size > 3) readCache.delete(readCache.keys().next().value);
+      if (readCache.size > 5) readCache.delete(readCache.keys().next().value);
     }
-    const key = pickKey(read.made);
-    const g = await engine.call("grade", { token, key: key && { made: key.made, p1: key.p1, p2: key.p2, p3: key.p3 }, settings: scoreSettings(), override });
-    return { token, read, graded: g.graded, p3final: g.p3final, image: g.image, key, override, src: srcJpeg };
+  }
+  return { read, jpeg };
+}
+function gradeSource(src, { token = uid(), override = {}, form = settings.form } = {}) {
+  return runJob(async () => {
+    const { read, jpeg } = await ensureRead(src, token, form);
+    if (read.error) return { error: read.error, src: jpeg, token };
+    const key = pickKey(read.made, form);
+    const g = await engine.call("grade", { token, key: key && { made: key.made, p1: key.p1, p2: key.p2, p3: key.p3 }, settings: scoreSettings(form), override });
+    return { token, form, read, graded: g.graded, p3final: g.p3final, image: g.image, key, override, src: jpeg };
   });
 }
 
@@ -196,7 +226,7 @@ function toRecord(r, old) {
   const p3 = rd.part3.map((it) => (r.p3final[it.q] || {}).value || "");
   const lowConf = rd.part3.some((it) => !(it.q in r.override) && it.note);
   return {
-    id: r.token, time: old ? old.time : Date.now(), src: r.src,
+    id: r.token, form: r.form, time: old ? old.time : Date.now(), src: r.src,
     sbd: rd.sbd, made: rd.made, keyId: r.key && r.key.id, keyMade: r.key && r.key.made,
     score: g ? g.score : null, max: g ? g.max : null,
     s1: g && g.summary.p1, s2: g && g.summary.p2, s3: g && g.summary.p3,
@@ -211,7 +241,7 @@ async function saveRecord(rec) {
   let replaced = null;
   if (rec.sbd && !rec.sbd.includes("?")) {
     const all = await db.all();
-    replaced = all.find((o) => o.id !== rec.id && o.sbd === rec.sbd && normMade(o.made) === normMade(rec.made));
+    replaced = all.find((o) => o.id !== rec.id && o.sbd === rec.sbd && normMade(o.made) === normMade(rec.made) && formOf(o) === formOf(rec));
     if (replaced) await db.del(replaced.id);
   }
   await db.put(rec);
@@ -236,18 +266,56 @@ function showLoading(srcBlob, text = "Đang chấm phiếu…") {
   openResultView();
 }
 
+// ---- Nút Tiếp theo / Trước: danh sách phiếu đang duyệt và vị trí phiếu đang xem
+const sessionIds = [];                // các phiếu chấm mới trong lần mở ứng dụng này, theo thứ tự chấm
+let navCtx = { ids: [], i: -1 };
+let navBusy = false;
+function setNav(ids, id) { navCtx = { ids: [...ids], i: ids.indexOf(id) }; }
+function trackNew(rec, replaced) {
+  if (replaced) { const i = sessionIds.indexOf(replaced.id); if (i >= 0) sessionIds.splice(i, 1); }
+  if (!sessionIds.includes(rec.id)) sessionIds.push(rec.id);
+}
+async function goNav(step) {
+  if (navBusy) return;
+  navBusy = true;
+  try {
+    let i = navCtx.i + step;
+    while (i >= 0 && i < navCtx.ids.length) {
+      const r = await db.get(navCtx.ids[i]);
+      if (r && r.src) {
+        navCtx.i = i;
+        await gradeAndShow(r.src, { token: r.id, override: r.override || {}, form: formOf(r), quiet: true });
+        return;
+      }
+      navCtx.ids.splice(i, 1);          // phiếu đã bị xoá / thay thế
+      if (step < 0) i += step;
+    }
+    renderResult();
+  } finally { navBusy = false; }
+}
+/** Đọc sẵn phiếu kế tiếp trong nền để bấm Tiếp theo là hiện ngay. */
+async function prefetchNext() {
+  const id = navCtx.ids[navCtx.i + 1];
+  if (!id || readCache.has(id)) return;
+  const r = await db.get(id);
+  if (r && r.src) runJob(() => ensureRead(r.src, r.id, formOf(r))).catch(() => {});
+}
+
 async function gradeAndShow(blob, opts = {}) {
-  freeUrls();
-  showLoading(blob);
+  const quiet = opts.quiet && topLayer() === "result";    // chuyển phiếu: giữ màn cũ tới khi có kết quả mới
+  if (!quiet) { freeUrls(); showLoading(blob); }
   try {
     const r = await gradeSource(blob, opts);
-    if (r.error) { showError(r.error, blob); buzz([60, 60, 60]); return; }
+    if (r.error) { if (quiet) freeUrls(); showError(r.error, blob); buzz([60, 60, 60]); return; }
     const old = opts.token ? await db.get(opts.token) : null;
     const rec = toRecord(r, old);
     const replaced = await saveRecord(rec);
     if (replaced) toast(`Đã thay kết quả cũ của SBD ${rec.sbd}`);
+    if (!opts.token) { trackNew(rec, replaced); setNav(sessionIds, rec.id); }
+    if (quiet) freeUrls();
     cur = { ...r, rec, edits: { ...r.override } };
     renderResult();
+    if (quiet) window.scrollTo(0, 0);
     buzz(40);
   } catch (e) {
     showError(e.message, blob);
@@ -281,14 +349,19 @@ function renderResult() {
   } else {
     hero.append(h("div", { class: "big", style: "font-size:30px" }, "Chưa có đáp án"),
       h("div", { class: "sub" }, "Đã đọc bài làm. Thêm đáp án để chấm điểm."),
-      h("button", { class: "btn primary", style: "margin-top:12px", onclick: () => openKeyEditor(null, { made: rd.made && !rd.made.includes("?") ? rd.made : "" }) }, "+ Nhập đáp án"));
+      h("button", { class: "btn primary", style: "margin-top:12px", onclick: () => openKeyEditor(null, { made: rd.made && !rd.made.includes("?") ? rd.made : "", form: cur.form }) }, "+ Nhập đáp án"));
   }
   const madeMismatch = g && key && key.made && rd.made && normMade(key.made) !== normMade(rd.made);
   hero.append(h("div", { class: "idrow" },
     h("span", { class: "tag" + (rd.sbd.includes("?") ? " bad" : "") }, "SBD ", h("b", {}, rd.sbd)),
     h("span", { class: "tag" + (rd.made.includes("?") || madeMismatch ? " bad" : "") }, "Mã đề ", h("b", {}, rd.made)),
-    key ? h("span", { class: "tag" }, "Đáp án: ", h("b", {}, key.made ? "mã " + key.made : "mặc định")) : null));
-  if (g) {
+    key ? h("span", { class: "tag" }, "Đáp án: ", h("b", {}, key.made ? "mã " + key.made : "mặc định")) : null,
+    FORMS[cur.form].parts ? null : h("span", { class: "tag" }, "Form tiếng Anh")));
+  if (g && !FORMS[cur.form].parts) {
+    const s = g.summary;
+    hero.append(h("div", { class: "parts one" },
+      h("div", {}, h("small", {}, "Số câu đúng"), h("b", {}, `${s.p1[0]}/${s.p1[1]}`), h("span", {}, fmt(s.p1[2]) + " điểm"))));
+  } else if (g) {
     const s = g.summary;
     hero.append(h("div", { class: "parts" },
       h("div", {}, h("small", {}, "Phần I"), h("b", {}, `${s.p1[0]}/${s.p1[1]}`), h("span", {}, fmt(s.p1[2]) + " điểm")),
@@ -350,15 +423,23 @@ function renderResult() {
   else kids.push(readOnlyDetail(rd));
 
   kids.push(h("button", { class: "btn soft danger wide", style: "margin-top:4px", onclick: deleteCurrent }, "Xoá kết quả này"));
-  kids.push(h("div", { class: "actions" },
+  // Thanh dưới: ‹ phiếu trước · Xong · 📷 chụp thêm · Tiếp theo › (hết danh sách thì nút chính là chấm bài mới)
+  const total = navCtx.ids.length, hasPrev = navCtx.i > 0, hasNext = navCtx.i >= 0 && navCtx.i < total - 1;
+  const capture = () => popLayer().then(startCapture);
+  $("#title").textContent = total > 1 ? `Kết quả · Tờ ${navCtx.i + 1}/${total}` : TITLES.result;
+  kids.push(h("div", { class: "actions nav" + (hasNext ? "" : " last") },
+    h("button", { class: "btn soft arrow", "aria-label": "Phiếu trước", disabled: !hasPrev, onclick: () => goNav(-1) }, "‹"),
     h("button", { class: "btn soft", onclick: () => popLayer() }, "Xong"),
-    h("button", { class: "btn primary", onclick: () => popLayer().then(startCapture) }, "📷 Chấm bài tiếp")));
-  v.replaceChildren(...kids);
+    hasNext ? h("button", { class: "btn soft", "aria-label": "Chấm bài mới", onclick: capture }, "📷") : null,
+    hasNext ? h("button", { class: "btn primary", id: "btn-next", onclick: () => goNav(1) }, "Tiếp theo ›")
+      : h("button", { class: "btn primary", onclick: capture }, "📷 Chấm bài tiếp")));
+  v.replaceChildren(...kids.filter(Boolean));
+  prefetchNext();
 }
 
 function detailP1(g) {
   const s = g.summary.p1;
-  return h("details", { class: "card acc" }, h("summary", {}, "Phần I", h("small", {}, `${s[0]}/${s[1]} câu đúng`)),
+  return h("details", { class: "card acc" }, h("summary", {}, FORMS[cur.form].parts ? "Phần I" : "Chi tiết từng câu", h("small", {}, `${s[0]}/${s[1]} câu đúng`)),
     h("div", { class: "grid1" }, g.p1.map((x) => {
       const cls = x.ok ? "ok" : x.student ? "bad" : "blank";
       return h("div", { class: "q1 " + cls }, h("small", {}, x.q), h("b", {}, x.student ? x.student.replace(" (nhiều)", "*") : "–"),
@@ -403,10 +484,12 @@ async function editP3(q, value) {
 async function regradeCurrent(msg) {
   const y = window.scrollY;
   try {
-    const r = await gradeSource(cur.src, { token: cur.token, override: { ...cur.edits } });
+    const me = cur;
+    const r = await gradeSource(cur.src, { token: cur.token, override: { ...cur.edits }, form: cur.form });
     if (r.error) { toast(r.error); return; }
-    const rec = toRecord(r, cur.rec);
+    const rec = toRecord(r, me.rec);
     await saveRecord(rec);
+    if (cur !== me) return;             // đã chuyển sang phiếu khác trong lúc chấm lại
     freeUrls();
     cur = { ...r, rec, edits: { ...r.override } };
     renderResult();
@@ -469,7 +552,7 @@ async function openCamera() {
     cam.track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
   cam.ic = "ImageCapture" in window ? new ImageCapture(cam.track) : null;
   cam.count = 0; $("#cam-count").textContent = ""; $("#cam-results").replaceChildren();
-  $("#cam-hint").textContent = settings.continuous ? "Chụp liên tục – đặt trọn tờ phiếu vào khung" : "Đặt trọn tờ phiếu vào khung";
+  $("#cam-hint").textContent = `${FORMS[settings.form].label}${settings.continuous ? " · chụp liên tục" : ""} – đặt trọn tờ phiếu vào khung`;
   try { cam.lock = await navigator.wakeLock.request("screen"); } catch { cam.lock = null; }
 }
 /** Khung ngắm khổ A4 nằm trọn trong vùng hình thật của camera (thấy gì chụp nấy). */
@@ -530,7 +613,7 @@ async function onShutter() {
     const rec = res.rec;
     chip.firstChild.textContent = rec.score == null ? "✓" : fmt(rec.score);
     chip.children[1].textContent = `SBD ${rec.sbd} · Mã ${rec.made}${rec.review || rec.warns.length ? " · ⚠ cần xem" : ""}`;
-    chip.onclick = () => popLayer().then(() => openRecord(rec.id));
+    chip.onclick = () => popLayer().then(() => openRecord(rec.id, sessionIds));
     buzz(40);
   });
 }
@@ -539,7 +622,7 @@ async function gradeBatchItem(blob) {
     const r = await gradeSource(blob);
     if (r.error) return r;
     const rec = toRecord(r, null);
-    await saveRecord(rec);
+    trackNew(rec, await saveRecord(rec));
     return { rec };
   } catch (e) { return { error: e.message }; }
 }
@@ -603,26 +686,28 @@ function initViewer() {
 // ============================================================ màn CHẤM
 function renderScan() {
   const b = $("#key-banner");
-  b.className = "card key-banner" + (keys.length ? "" : " none");
-  const ico = h("div", { class: "kb-ico", html: keys.length ? '<svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 8v5m0 3v.5"/><circle cx="12" cy="12" r="9"/></svg>' });
+  const fkeys = formKeys();
+  b.className = "card key-banner" + (fkeys.length ? "" : " none");
+  const ico = h("div", { class: "kb-ico", html: fkeys.length ? '<svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 8v5m0 3v.5"/><circle cx="12" cy="12" r="9"/></svg>' });
   let txt;
-  if (!keys.length) txt = h("div", { class: "kb-txt" }, h("b", {}, "Chưa có đáp án"), h("small", {}, "Vẫn đọc được bài làm; thêm đáp án để chấm điểm"));
-  else if (settings.autoKey && keys.length > 1) txt = h("div", { class: "kb-txt" }, h("b", {}, `${keys.length} bộ đáp án · tự chọn theo mã đề`), h("small", {}, keys.map((k) => k.made || "mặc định").join(", ")));
+  if (!fkeys.length) txt = h("div", { class: "kb-txt" }, h("b", {}, "Chưa có đáp án"), h("small", {}, "Vẫn đọc được bài làm; thêm đáp án để chấm điểm"));
+  else if (settings.autoKey && fkeys.length > 1) txt = h("div", { class: "kb-txt" }, h("b", {}, `${fkeys.length} bộ đáp án · tự chọn theo mã đề`), h("small", {}, fkeys.map((k) => k.made || "mặc định").join(", ")));
   else { const k = pickKey(null); txt = h("div", { class: "kb-txt" }, h("b", {}, "Đáp án: " + (k.made ? "mã đề " + k.made : "mặc định")), h("small", {}, keyDesc(k))); }
-  b.replaceChildren(ico, txt, h("button", { class: "btn soft sm", style: "background:var(--primary-soft)", onclick: () => keys.length ? switchTab("keys") : openKeyEditor(null) }, keys.length ? "Đổi" : "+ Thêm"));
+  b.replaceChildren(ico, txt, h("button", { class: "btn soft sm", style: "background:var(--primary-soft)", onclick: () => fkeys.length ? switchTab("keys") : openKeyEditor(null) }, fkeys.length ? "Đổi" : "+ Thêm"));
   $("#sw-continuous").checked = settings.continuous;
   db.all().then((all) => {
     $("#recent-title").hidden = !all.length;
-    $("#recent").replaceChildren(...all.slice(0, 4).map(histItem));
+    const ids = all.map((r) => r.id);
+    $("#recent").replaceChildren(...all.slice(0, 4).map((r) => histItem(r, ids)));
   });
 }
 
 // ============================================================ màn KẾT QUẢ ĐÃ CHẤM
-function histItem(r) {
+function histItem(r, ids) {
   const sc = r.score == null ? h("div", { class: "score na" }, "chưa\nchấm") : h("div", { class: "score " + ratioClass(r.score, r.max) }, fmt(r.score));
   const flag = r.review || (r.warns && r.warns.length) ? h("span", { class: "flag" }, "⚠ xem lại") : null;
-  return h("button", { class: "item", onclick: () => openRecord(r.id) }, sc,
-    h("div", { class: "meta" }, h("b", {}, "SBD " + r.sbd), h("small", {}, `Mã đề ${r.made} · ${timeStr(r.time)}${r.max != null ? " · /" + fmt(r.max) : ""}`)), flag);
+  return h("button", { class: "item", onclick: () => openRecord(r.id, ids) }, sc,
+    h("div", { class: "meta" }, h("b", {}, "SBD " + r.sbd), h("small", {}, `Mã đề ${r.made} · ${timeStr(r.time)}${r.max != null ? " · /" + fmt(r.max) : ""}${formOf(r) === "english" ? " · Tiếng Anh" : ""}`)), flag);
 }
 async function renderHistory() {
   const all = await db.all();
@@ -634,7 +719,7 @@ async function renderHistory() {
     h("div", {}, h("b", {}, all.length), h("small", {}, "phiếu đã chấm")),
     h("div", {}, h("b", {}, avg == null ? "–" : fmt(avg)), h("small", {}, "điểm TB (thang 10)")),
     h("div", {}, h("b", {}, all.filter((r) => r.review || (r.warns && r.warns.length)).length), h("small", {}, "cần xem lại")));
-  $("#hist-list").replaceChildren(...(list.length ? list.map(histItem) : [h("div", { class: "empty", html: '<svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg><p>' + (q ? "Không có SBD phù hợp" : "Chưa có phiếu nào. Vào tab <b>Chấm</b> để bắt đầu.") + "</p>" })]));
+  $("#hist-list").replaceChildren(...(list.length ? list.map((r) => histItem(r, list.map((x) => x.id))) : [h("div", { class: "empty", html: '<svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg><p>' + (q ? "Không có SBD phù hợp" : "Chưa có phiếu nào. Vào tab <b>Chấm</b> để bắt đầu.") + "</p>" })]));
   ["btn-export", "btn-regrade-all", "btn-clear"].forEach((id) => ($("#" + id).disabled = !all.length));
 }
 async function updateBadge() {
@@ -642,21 +727,22 @@ async function updateBadge() {
   const n = all.filter((r) => r.review || (r.warns && r.warns.length)).length;
   const b = $("#hist-badge"); b.hidden = !n; b.textContent = n;
 }
-async function openRecord(id) {
+async function openRecord(id, ids = [id]) {
   const r = await db.get(id);
   if (!r) return;
   if (!r.src) { toast("Phiếu này không còn ảnh gốc"); return; }
-  gradeAndShow(r.src, { token: r.id, override: r.override || {} });
+  setNav(ids, id);
+  gradeAndShow(r.src, { token: r.id, override: r.override || {}, form: formOf(r) });
 }
 async function exportExcel() {
   const all = (await db.all()).sort((a, b) => a.sbd.localeCompare(b.sbd) || a.time - b.time);
   const rows = [["STT", "SBD", "Mã đề", "Tổng điểm", "Thang 10", "P.I câu đúng", "Điểm P.I", "P.II ý đúng", "Điểm P.II", "P.III câu đúng", "Điểm P.III",
-    "Bài làm Phần I", "Bài làm Phần II", "Bài làm Phần III", "Ghi chú", "Thời gian chấm"]];
+    "Bài làm Phần I", "Bài làm Phần II", "Bài làm Phần III", "Ghi chú", "Thời gian chấm", "Kiểu phiếu"]];
+  const frac = (s) => (s && s[1] ? `${s[0]}/${s[1]}` : ""), pts = (s) => (s && s[1] ? s[2] : null);
   all.forEach((r, i) => rows.push([i + 1, r.sbd, r.made, r.score, r.max ? Math.round(r.score / r.max * 1000) / 100 : null,
-    r.s1 ? `${r.s1[0]}/${r.s1[1]}` : "", r.s1 ? r.s1[2] : null, r.s2 ? `${r.s2[0]}/${r.s2[1]}` : "", r.s2 ? r.s2[2] : null,
-    r.s3 ? `${r.s3[0]}/${r.s3[1]}` : "", r.s3 ? r.s3[2] : null, r.p1, r.p2, r.p3,
-    [...(r.warns || []), r.review ? "Phần III cần kiểm tra bài tô" : ""].filter(Boolean).join(" | "), new Date(r.time).toLocaleString("vi-VN")]));
-  const blob = makeXlsx(rows, [5, 9, 8, 10, 9, 11, 9, 11, 9, 12, 10, 44, 40, 30, 40, 18]);
+    frac(r.s1), pts(r.s1), frac(r.s2), pts(r.s2), frac(r.s3), pts(r.s3), r.p1, r.p2, r.p3,
+    [...(r.warns || []), r.review ? "Phần III cần kiểm tra bài tô" : ""].filter(Boolean).join(" | "), new Date(r.time).toLocaleString("vi-VN"), FORMS[formOf(r)].label]));
+  const blob = makeXlsx(rows, [5, 9, 8, 10, 9, 11, 9, 11, 9, 12, 10, 44, 40, 30, 40, 18, 15]);
   const d = new Date();
   download(blob, `ket-qua-cham-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${d.getHours()}h${String(d.getMinutes()).padStart(2, "0")}.xlsx`);
   toast(`Đã xuất ${all.length} phiếu ra file Excel (thư mục Tải xuống)`, 3500);
@@ -667,7 +753,7 @@ async function regradeRecords(filter, label) {
   for (const r of all) {
     toast(`${label} ${++n}/${all.length}…`, 60000);
     try {
-      const res = await gradeSource(r.src, { token: r.id, override: r.override || {} });
+      const res = await gradeSource(r.src, { token: r.id, override: r.override || {}, form: formOf(r) });
       if (res.error) { err++; continue; }
       await db.put(toRecord(res, r));
     } catch { err++; }
@@ -684,30 +770,34 @@ async function handleFiles(files) {
   if (topLayer() === "result") await popLayer();
   switchTab("history");
   let ok = 0, bad = 0;
+  const batch = [];
   for (let i = 0; i < files.length; i++) {
     toast(`Đang chấm ${i + 1}/${files.length}…`, 60000);
     const r = await gradeBatchItem(files[i]);
     r.error ? bad++ : ok++;
+    if (r.rec) batch.push(r.rec.id);
     if (curTab === "history" && !topLayer()) renderHistory();
   }
   buzz(60);
-  toast(`Xong: ${ok} phiếu đã chấm` + (bad ? `, ${bad} ảnh không đọc được` : ""), 4000);
+  toast(`Xong: ${ok} phiếu đã chấm` + (bad ? `, ${bad} ảnh không đọc được` : "") + (batch.length ? " – chạm vào đây để xem từng tờ" : ""),
+    8000, batch.length ? () => { $("#toast").classList.remove("show"); openRecord(batch[0], batch); } : undefined);
 }
 
 // ============================================================ ĐÁP ÁN
 function renderKeys() {
   const list = $("#key-list");
-  if (!keys.length) {
+  const fkeys = formKeys();
+  if (!fkeys.length) {
     list.replaceChildren(h("div", { class: "empty", html: '<svg viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M20 12v7H4V5h11"/></svg><p>Chưa có bộ đáp án nào</p>' }));
     return;
   }
   const using = pickKey(null);
-  list.replaceChildren(...keys.map((k) => h("div", { class: "card keycard", onclick: () => openKeyEditor(k) },
+  list.replaceChildren(...fkeys.map((k) => h("div", { class: "card keycard", onclick: () => openKeyEditor(k) },
     h("div", { class: "kc-made" }, h("small", {}, "MÃ ĐỀ"), k.made || "–"),
     h("div", { class: "kc-info" }, h("b", {}, k.made ? "Mã đề " + k.made : "Đáp án mặc định"), h("small", {}, keyDesc(k)), h("small", {}, "Sửa " + timeStr(k.updated))),
     h("button", {
       class: "use" + (k.id === using.id ? " on" : ""), onclick: (e) => {
-        e.stopPropagation(); activeKeyId = k.id; saveKeys(); renderKeys();
+        e.stopPropagation(); activeKey[settings.form] = k.id; saveKeys(); renderKeys();
         toast(settings.autoKey ? "Dùng khi mã đề trên phiếu không khớp bộ nào" : "Đã chọn bộ đáp án này");
       },
     }, k.id === using.id ? "✓ Mặc định" : "Đặt mặc định"))));
@@ -717,7 +807,12 @@ let draft = null, keTab = "p1", k1cur = 1;
 const KEY_SAMPLE = "MÃ ĐỀ: 101\n\nPHẦN I\n1D 2B 3A 4C 5B 6A 7C 8B 9D 10B\n11C 12B\n\nPHẦN II\n1: ĐSĐS\n2: SSĐĐ\n\nPHẦN III\n1: 12,5\n2: -3\n";
 function openKeyEditor(k, preset = {}) {
   draft = k ? JSON.parse(JSON.stringify(k)) : { id: null, made: preset.made || "", p1: {}, p2: {}, p3: {} };
-  $("#ke-title").textContent = k ? "Sửa đáp án" : "Thêm đáp án";
+  draft.form = k ? formOf(k) : preset.form || settings.form;
+  const full = FORMS[draft.form].parts;
+  $("#ke-tabs").classList.toggle("two", !full);
+  $$("#ke-tabs button").forEach((b) => { b.hidden = !full && (b.dataset.tab === "p2" || b.dataset.tab === "p3"); });
+  $("#ke-text").value = "";
+  $("#ke-title").textContent = (k ? "Sửa đáp án" : "Thêm đáp án") + (full ? "" : " · Tiếng Anh");
   $("#ke-made").value = draft.made || "";
   $("#ke-delete").hidden = !k;
   $("#ke-err").textContent = "";
@@ -734,13 +829,14 @@ function setKeTab(t) {
   $$("#ke-tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === t));
   $$(".ke-pane").forEach((p) => p.classList.toggle("active", p.id === "ke-" + t));
   if (t === "txt" && !$("#ke-text").value.trim()) $("#ke-text").value = keyCounts(draft).p1 + keyCounts(draft).p2 + keyCounts(draft).p3 ? keyToText(draft) : "";
-  if (t === "txt") $("#ke-text").placeholder = KEY_SAMPLE;
+  if (t === "txt") $("#ke-text").placeholder = FORMS[draft.form].parts ? KEY_SAMPLE : KEY_SAMPLE_EN;
 }
+const KEY_SAMPLE_EN = "MÃ ĐỀ: 101\n\n1D 2B 3A 4C 5B 6A 7C 8B 9D 10B\n11C 12B\n";
 function keyToText(k) {
   const lines = [];
   if (k.made) lines.push("MÃ ĐỀ: " + k.made, "");
   const p1 = Object.entries(k.p1).sort((a, b) => a[0] - b[0]).map(([q, a]) => q + a);
-  if (p1.length) { lines.push("PHẦN I"); for (let i = 0; i < p1.length; i += 10) lines.push(p1.slice(i, i + 10).join(" ")); lines.push(""); }
+  if (p1.length) { if (FORMS[formOf(k)].parts) lines.push("PHẦN I"); for (let i = 0; i < p1.length; i += 10) lines.push(p1.slice(i, i + 10).join(" ")); lines.push(""); }
   const p2 = Object.entries(k.p2).sort((a, b) => a[0] - b[0]);
   if (p2.length) { lines.push("PHẦN II", ...p2.map(([q, a]) => `${q}: ${a}`), ""); }
   const p3 = Object.entries(k.p3).sort((a, b) => a[0] - b[0]);
@@ -749,10 +845,11 @@ function keyToText(k) {
 }
 function renderKeyPanes() {
   const c = keyCounts(draft);
-  $("#ke-c1").textContent = c.p1 + "/40"; $("#ke-c2").textContent = c.p2 + "/8"; $("#ke-c3").textContent = c.p3 + "/6";
-  // Phần I: lưới 40 câu x A B C D – chạm là chọn và tự nhảy sang câu sau
+  const n1 = FORMS[draft.form].p1, half = Math.ceil(n1 / 2);
+  $("#ke-c1").textContent = `${c.p1}/${n1}`; $("#ke-c2").textContent = c.p2 + "/8"; $("#ke-c3").textContent = c.p3 + "/6";
+  // Phần I: lưới câu x A B C D – chạm là chọn và tự nhảy sang câu sau
   const rows = [];
-  for (let q = 1; q <= 40; q++) {
+  for (let q = 1; q <= n1; q++) {
     rows.push(h("div", { class: "k1row" + (q === k1cur ? " cur" : "") }, h("span", { class: "n" }, q),
       ...LETTERS.split("").map((L) => h("button", {
         class: draft.p1[q] === L ? "on" : "", onclick: () => {
@@ -761,9 +858,9 @@ function renderKeyPanes() {
         },
       }, L))));
   }
-  // chia 2 cột: 1–20 bên trái, 21–40 bên phải
+  // chia 2 cột: nửa đầu bên trái, nửa sau bên phải
   const order = [];
-  for (let i = 0; i < 20; i++) order.push(rows[i], rows[i + 20]);
+  for (let i = 0; i < half; i++) order.push(rows[i], rows[i + half]);
   $("#ke-p1").replaceChildren(
     h("div", { class: "k1tools" }, h("span", { class: "muted" }, `Đã nhập ${c.p1} câu · câu để trống không chấm`),
       h("button", { onclick: () => { if (confirm("Xoá toàn bộ đáp án Phần I?")) { draft.p1 = {}; k1cur = 1; renderKeyPanes(); } } }, "Xoá hết")),
@@ -802,7 +899,7 @@ async function parseKeyText() {
   if (!text.trim()) { $("#ke-err").textContent = "Chưa có nội dung."; return; }
   $("#ke-parse").disabled = true; $("#ke-parse").textContent = engine.ready ? "Đang đọc…" : "Chờ bộ chấm khởi động…";
   try {
-    const k = await engine.call("parseKey", { text });
+    const k = await engine.call("parseKey", { text, form: draft.form });
     if (k.error) { $("#ke-err").textContent = k.error; return; }
     draft.p1 = k.p1; draft.p2 = k.p2; draft.p3 = k.p3;
     if (k.made) { draft.made = k.made; $("#ke-made").value = k.made; }
@@ -824,14 +921,14 @@ async function saveKey() {
   if (bad3.length) errs.push(`Phần III câu ${bad3.join(", ")} không phải số hợp lệ.`);
   const c = keyCounts(draft);
   if (!c.p1 && !c.p2 && !c.p3) errs.push("Chưa nhập câu nào.");
-  const dup = keys.find((k) => k.id !== draft.id && normMade(k.made) === normMade(draft.made));
+  const dup = formKeys(draft.form).find((k) => k.id !== draft.id && normMade(k.made) === normMade(draft.made));
   if (dup) errs.push(draft.made ? `Đã có bộ đáp án mã đề ${draft.made}.` : "Đã có một bộ đáp án không ghi mã đề.");
   if (errs.length) { alert(errs.join("\n")); return; }
   const isNew = !draft.id;
   draft.updated = Date.now();
   if (isNew) { draft.id = uid(); keys.push(draft); } else keys[keys.findIndex((k) => k.id === draft.id)] = draft;
   keys.sort((a, b) => (a.made || "").localeCompare(b.made || "", undefined, { numeric: true }));
-  if (!activeKeyId || !keys.some((k) => k.id === activeKeyId)) activeKeyId = draft.id;
+  if (!formKeys(draft.form).some((k) => k.id === activeKey[draft.form])) activeKey[draft.form] = draft.id;
   saveKeys();
   const saved = draft;
   await popLayer();
@@ -841,7 +938,7 @@ async function saveKey() {
   // chấm lại các phiếu đã chấm của mã đề này cho đúng đáp án mới
   if (!isNew) {
     const all = await db.all();
-    const affected = all.filter((r) => r.keyId === saved.id || (saved.made && normMade(r.made) === normMade(saved.made)));
+    const affected = all.filter((r) => formOf(r) === saved.form && (r.keyId === saved.id || (saved.made && normMade(r.made) === normMade(saved.made))));
     if (affected.length && confirm(`Có ${affected.length} phiếu đã chấm theo đáp án này. Chấm lại theo đáp án mới?`))
       regradeRecords((r) => affected.some((a) => a.id === r.id), "Đang chấm lại");
   }
@@ -850,7 +947,7 @@ async function saveKey() {
 async function deleteKey() {
   if (!confirm(`Xoá bộ đáp án ${draft.made ? "mã đề " + draft.made : "này"}?`)) return;
   keys = keys.filter((k) => k.id !== draft.id);
-  if (activeKeyId === draft.id) activeKeyId = keys[0] ? keys[0].id : null;
+  if (activeKey[draft.form] === draft.id) delete activeKey[draft.form];
   saveKeys();
   await popLayer();
   renderKeys(); renderScan();
@@ -859,6 +956,7 @@ async function deleteKey() {
 // ============================================================ CÀI ĐẶT
 function renderSettings() {
   $("#set-p1").value = fmt(settings.p1);
+  $("#set-p1en").value = fmt(settings.p1En);
   $("#set-p3").value = String(settings.p3);
   $("#set-p2").replaceChildren(...[1, 2, 3, 4].map((n) => h("label", {}, `${n} ý đúng`,
     h("input", {
@@ -876,6 +974,7 @@ function renderSettings() {
 }
 function initSettings() {
   $("#set-p1").onchange = (e) => { const v = num(e.target.value); if (v != null && v > 0) { settings.p1 = v; saveSettings(); } e.target.value = fmt(settings.p1); };
+  $("#set-p1en").onchange = (e) => { const v = num(e.target.value); if (v != null && v > 0) { settings.p1En = v; saveSettings(); } e.target.value = fmt(settings.p1En); };
   $("#set-p3").onchange = (e) => { settings.p3 = parseFloat(e.target.value); saveSettings(); };
   $("#set-autokey").onchange = (e) => { settings.autoKey = e.target.checked; saveSettings(); };
   $("#set-delta").oninput = (e) => { $("#set-delta-v").textContent = e.target.value; };
@@ -959,7 +1058,7 @@ function init() {
   window.addEventListener("resize", () => { if (cam.stream) positionGuide(); });
   initViewer(); initSettings(); initSW();
   engine.start();
-  renderScan(); updateBadge();
+  renderFormSwitch(); renderScan(); updateBadge();
   // mở bằng lối tắt "Chụp phiếu" từ biểu tượng ứng dụng
   if (new URLSearchParams(location.search).get("action") === "scan") setTimeout(startCapture, 300);
 }
