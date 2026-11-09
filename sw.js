@@ -1,5 +1,5 @@
 /* Service worker: lưu sẵn ứng dụng + Python/OpenCV để dùng được cả khi không có mạng. */
-const VERSION = "44937b98bb"; // build_mobile.py tự cập nhật mỗi lần đóng gói
+const VERSION = "72e908b331"; // build_mobile.py tự cập nhật mỗi lần đóng gói
 const APP_CACHE = "cham-app-" + VERSION;
 const CDN = "https://cdn.jsdelivr.net/pyodide/v0.29.3/full/";
 const CDN_CACHE = "cham-pyodide-v0.29.3";
@@ -16,7 +16,7 @@ self.addEventListener("install", (e) => {
     caches.open(CDN_CACHE).then(async (cc) => {
       for (const u of CDN_FILES) if (!(await cc.match(u))) await cc.add(new Request(u, { mode: "cors" })).catch(() => {});
     });
-    if (!self.registration.active) self.skipWaiting();   // lần cài đầu tiên: dùng ngay
+    self.skipWaiting();   // luôn dùng ngay bản mới, không chờ người dùng đóng hết cửa sổ
   })());
 });
 
@@ -27,8 +27,6 @@ self.addEventListener("activate", (e) => {
     await self.clients.claim();
   })());
 });
-
-self.addEventListener("message", (e) => { if (e.data === "skipWaiting") self.skipWaiting(); });
 
 self.addEventListener("fetch", (e) => {
   const req = e.request;

@@ -1,6 +1,6 @@
 "use strict";
 /* Chấm Phiếu THPT – ứng dụng điện thoại. Toàn bộ nhận dạng chạy trên máy (engine-worker.js). */
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.2.0";
 
 // ============================================================ tiện ích
 const $ = (s, r = document) => r.querySelector(s);
@@ -194,7 +194,8 @@ async function prepImage(blob, maxSide = 2600) {
 
 const readCache = new Map();          // token -> kết quả đọc (giữ cùng lúc với bộ nhớ của bộ chấm)
 let pipeline = Promise.resolve();     // các phiếu được chấm lần lượt
-function runJob(fn) { const p = pipeline.then(fn, fn); pipeline = p.catch(() => {}); return p; }
+let jobs = 0;                         // số việc chấm đang chạy / đang chờ
+function runJob(fn) { jobs++; const p = pipeline.then(fn, fn); pipeline = p.catch(() => {}).finally(() => { jobs--; }); return p; }
 
 /** Đọc + chấm 1 ảnh. Trả {token, read, graded, p3final, image, key, src} hoặc {error, src}. */
 async function ensureRead(src, token, form) {
@@ -994,17 +995,18 @@ window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); inst
 window.addEventListener("appinstalled", () => { $("#btn-install").hidden = true; toast("Đã cài ứng dụng vào màn hình chính"); });
 function initSW() {
   if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
+  const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.register("sw.js").then((reg) => {
-    reg.addEventListener("updatefound", () => {
-      const nw = reg.installing;
-      nw && nw.addEventListener("statechange", () => {
-        if (nw.state === "installed" && navigator.serviceWorker.controller)
-          toast("Có bản cập nhật mới – chạm vào đây để dùng", 15000, () => nw.postMessage("skipWaiting"));
-      });
-    });
+    // ứng dụng đã cài có thể mở rất lâu: mỗi lần quay lại thì kiểm tra bản mới
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) reg.update().catch(() => {}); });
   }).catch(() => {});
-  let reloaded = false;
-  navigator.serviceWorker.addEventListener("controllerchange", () => { if (!reloaded) { reloaded = true; location.reload(); } });
+  // Có bản mới -> tự tải lại, nhưng đợi lúc rảnh để không làm mất bài đang xem / đang chấm
+  let waitingReload = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController || waitingReload) return;       // lần cài đầu tiên thì không cần tải lại
+    waitingReload = true;
+    setInterval(() => { if (!layers.length && !jobs) location.reload(); }, 500);
+  });
 }
 
 // ============================================================ khởi động
